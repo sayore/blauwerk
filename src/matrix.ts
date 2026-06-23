@@ -32,6 +32,7 @@ export class Recovery {
     connectTimeoutMs: number;
     bondWaitMs?: number;
     requireBond?: boolean;
+    allowSessionDrop?: boolean;
   }) {}
 
   private async once(key: string, action: () => Promise<void>): Promise<void> {
@@ -77,13 +78,60 @@ export class Recovery {
     return healthy(state) || (usable(state) && !this.options.requireBond);
   }
 
+  private async scanFor(mac: string, mode: Attempt["scan"], seconds = this.options.scanSeconds): Promise<{ devices: DeviceState[]; targetSeen: boolean }> {
+    const controller = new AbortController();
+    let targetSeen = false;
+    log("scan.start", { mode, seconds });
+    const devices = await this.bluez.scanLive(mode, seconds, {
+      signal: controller.signal,
+      onSeen: seenMac => {
+        if (seenMac !== mac) return;
+        targetSeen = true;
+        controller.abort();
+      },
+    });
+    log("scan.end", { devices: devices.length, targetSeen, stoppedEarly: targetSeen });
+    return { devices, targetSeen };
+  }
+
   async run(mac: string, matrix: Attempt[]): Promise<DeviceState> {
     await this.bluez.prepare();
     let state = await this.bluez.info(mac);
     if (state.paired) {
       state = await this.connect(mac);
-      state = await this.settleBond(mac, state);
       if (this.mayStop(state)) return state;
+      if (this.options.requireBond && state.bonded === false) {
+        log("recovery.fast-path", { reason: "rebond-required", phase: "advertising-preflight" });
+        let preflight = await this.scanFor(mac, "bredr", state.connected ? Math.min(3, this.options.scanSeconds) : this.options.scanSeconds);
+        if (!preflight.targetSeen && state.connected && this.options.allowSessionDrop) {
+          log("recovery.fast-path", { reason: "rebond-required", phase: "disconnect-probe" });
+          log("recovery.user-action", { message: "Keep the device in host pairing mode during the next discovery window." });
+          await this.bluez.disconnect(mac).catch(error => log("disconnect.failed", { error: String(error) }));
+          await Bun.sleep(500);
+          await this.bluez.prepare();
+          preflight = await this.scanFor(mac, "bredr");
+        }
+        if (!preflight.targetSeen) {
+          if (this.options.allowSessionDrop) {
+            log("recovery.rollback", { phase: "restore-working-session" });
+            state = await this.connect(mac);
+          }
+          log("recovery.stop", {
+            reason: "rebond-target-not-advertising",
+            message: this.options.allowSessionDrop
+              ? "Target did not advertise after disconnect; reconnect was attempted and BlueZ state was not removed."
+              : "Working session preserved. Put the device in pairing mode before rebonding.",
+          });
+          return state;
+        }
+        log("recovery.fast-path", { reason: "rebond-required", phase: "remove-ephemeral-pairing" });
+        await this.bluez.disconnect(mac).catch(() => {});
+        await this.bluez.remove(mac).catch(() => {});
+        state = await this.bluez.info(mac);
+      } else {
+        state = await this.settleBond(mac, state);
+        if (this.mayStop(state)) return state;
+      }
     }
 
     for (const [index, attempt] of matrix.entries()) {
@@ -93,6 +141,7 @@ export class Recovery {
         if (healthy(state)) return state;
         if (state.paired) {
           state = await this.connect(mac);
+          if (this.mayStop(state)) return state;
           state = await this.settleBond(mac, state);
           if (this.mayStop(state)) return state;
           await this.bluez.disconnect(mac).catch(() => {});
@@ -102,11 +151,9 @@ export class Recovery {
         if (attempt.reset === "purge") await this.once("purge", () => this.bluez.purge(mac));
         if (attempt.reset === "powercycle") await this.once("powercycle", () => this.bluez.powercycle());
         await this.bluez.prepare();
-        log("scan.start", { mode: attempt.scan, seconds: this.options.scanSeconds });
-        const devices = await this.bluez.scan(attempt.scan, this.options.scanSeconds);
-        log("scan.end", { devices: devices.length, targetSeen: devices.some(device => device.mac === mac) });
+        const { targetSeen } = await this.scanFor(mac, attempt.scan);
         state = await this.bluez.info(mac);
-        if (!state.available) {
+        if (!targetSeen) {
           const message = `Target ${mac} was not seen during ${this.options.scanSeconds}s ${attempt.scan} scan`;
           if (attempt.scan === "on") {
             log("recovery.stop", { reason: "target-not-advertising", message });
@@ -155,8 +202,6 @@ export class Recovery {
           });
           return this.bluez.info(mac);
         }
-      } finally {
-        await this.bluez.stopScan().catch(() => {});
       }
     }
     return this.bluez.info(mac);

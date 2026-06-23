@@ -13,20 +13,59 @@ export function normalizeMac(value: string): string {
 export function parseDeviceInfo(raw: string, fallbackMac = "00:00:00:00:00:00"): DeviceState {
   const value = (key: string) => raw.match(new RegExp(`^\\s*${key}:\\s*(.+)$`, "mi"))?.[1]?.trim();
   const yes = (key: string) => value(key)?.toLowerCase() === "yes";
-  const headerMac = raw.match(/^Device\s+([0-9A-F:]{17})/mi)?.[1];
+  const header = raw.match(/^Device\s+([0-9A-F:]{17})(?:\s+\(([^)]+)\))?/mi);
+  const headerMac = header?.[1];
   const bonded = value("Bonded");
   const servicesResolved = value("ServicesResolved");
   const rssiValue = value("RSSI");
   const rssi = rssiValue?.match(/\((-?\d+)\)\s*$/)?.[1] ?? rssiValue?.match(/^-?\d+$/)?.[0];
   return {
-    mac: headerMac ?? fallbackMac, available: !/not available/i.test(raw),
-    name: value("Name"), alias: value("Alias"), paired: yes("Paired"),
+    mac: headerMac ?? fallbackMac, available: !/not available/i.test(raw), addressType: header?.[2],
+    name: value("Name"), alias: value("Alias"), icon: value("Icon"), class: value("Class"),
+    legacyPairing: value("LegacyPairing") === undefined ? undefined : yes("LegacyPairing"), paired: yes("Paired"),
     bonded: bonded === undefined ? undefined : bonded.toLowerCase() === "yes",
     trusted: yes("Trusted"), blocked: yes("Blocked"), connected: yes("Connected"),
     servicesResolved: servicesResolved === undefined ? undefined : servicesResolved.toLowerCase() === "yes",
     rssi: rssi === undefined ? undefined : Number(rssi),
     uuids: [...raw.matchAll(/^\s*UUID:\s*(.+)$/gmi)].map(match => match[1]!.trim()), raw,
   };
+}
+
+export interface DiscoveryEvent {
+  mac: string;
+  name?: string;
+}
+
+export function parseDiscoveryLine(line: string): DiscoveryEvent | undefined {
+  const added = line.match(/^\s*\[(?:NEW|CHG)\]\s+Device\s+([0-9A-F:]{17})\s+(.+?)\s*$/i);
+  if (!added) return undefined;
+  const mac = normalizeMac(added[1]!);
+  const detail = added[2]!.trim();
+  const property = detail.match(/^(?:Name|Alias):\s*(.+)$/i)?.[1]?.trim();
+  if (/^[A-Za-z]+(?:\.[A-Za-z]+)*:\s*/.test(detail) && !property) return { mac };
+  return { mac, name: property ?? detail };
+}
+
+async function consumeLines(stream: ReadableStream<Uint8Array>, onLine?: (line: string) => void): Promise<string> {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let output = "";
+  let pending = "";
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    const text = decoder.decode(value, { stream: true });
+    output += text;
+    pending += text;
+    const lines = pending.split(/\r?\n/);
+    pending = lines.pop() ?? "";
+    for (const line of lines) onLine?.(line);
+  }
+  const tail = decoder.decode();
+  output += tail;
+  pending += tail;
+  if (pending) onLine?.(pending);
+  return output;
 }
 
 export class Bluez {
@@ -61,42 +100,67 @@ export class Bluez {
     return rows.map(row => ({ ...parseDeviceInfo("", row[1]!), name: row[2]!.trim() }));
   }
 
-  async scan(mode: ScanMode, seconds: number): Promise<DeviceState[]> {
+  async scanLive(mode: ScanMode, seconds: number, options: {
+    signal?: AbortSignal;
+    onSeen?: (mac: string) => void;
+    onDevice?: (device: DeviceState) => void;
+  } = {}): Promise<DeviceState[]> {
     if (!(["bredr", "le", "on"] as string[]).includes(mode)) throw new Error(`Invalid scan mode: ${mode}`);
     if (this.dryRun) return this.devices();
-    await this.stopScan();
+    if (options.signal?.aborted) return [];
     const duration = Math.max(1, seconds);
     const session = Bun.spawn(["bluetoothctl"], {
       stdin: "pipe", stdout: "pipe", stderr: "pipe", env: Bun.env,
     });
-    const output = Promise.all([
-      new Response(session.stdout).text(),
-      new Response(session.stderr).text(),
-    ]);
+    const abortSession = () => { if (session.exitCode === null) session.kill("SIGKILL"); };
+    options.signal?.addEventListener("abort", abortSession, { once: true });
+    const seen = new Map<string, DeviceState>();
+    const onLine = (line: string) => {
+      const event = parseDiscoveryLine(line);
+      if (!event) return;
+      options.onSeen?.(event.mac);
+      if (!event.name) return;
+      const previous = seen.get(event.mac);
+      if (previous && previous.name === event.name) return;
+      const device = { ...parseDeviceInfo("", event.mac), name: event.name ?? previous?.name };
+      seen.set(event.mac, device);
+      options.onDevice?.(device);
+    };
+    const output = Promise.all([consumeLines(session.stdout, onLine), consumeLines(session.stderr, onLine)]);
     try {
       const stdin = session.stdin;
       if (!stdin) throw new Error("Could not open bluetoothctl scan session");
-      stdin.write(`scan ${mode}\n`);
-      await Bun.sleep(duration * 1_000);
-      stdin.write("scan off\nquit\n");
-      stdin.end();
-      const exit = await Promise.race([
-        session.exited,
-        Bun.sleep(10_000).then(() => 124),
-      ]);
+      stdin.write(`scan off\nscan ${mode}\n`);
+      const deadline = Date.now() + duration * 1_000;
+      while (Date.now() < deadline && !options.signal?.aborted) await Bun.sleep(Math.min(100, deadline - Date.now()));
+      if (!options.signal?.aborted) {
+        stdin.write("scan off\nquit\n");
+        stdin.end();
+      }
+      const exit = await new Promise<number>(resolve => {
+        const timer = setTimeout(() => resolve(124), 10_000);
+        session.exited.then(code => { clearTimeout(timer); resolve(code); });
+      });
       if (exit === 124) session.kill("SIGKILL");
       const [stdout, stderr] = await output;
-      if (!/Discovery started|SetDiscoveryFilter success|Changing power on succeeded/i.test(`${stdout}\n${stderr}`)) {
+      if (!options.signal?.aborted && !/Discovery started|SetDiscoveryFilter success|Changing power on succeeded/i.test(`${stdout}\n${stderr}`)) {
         throw new Error(`BlueZ did not confirm discovery start: ${(stderr || stdout).trim()}`);
       }
     } finally {
+      options.signal?.removeEventListener("abort", abortSession);
       if (session.exitCode === null) session.kill("SIGKILL");
-      await this.stopScan();
+      // BlueZ drops this client's discovery request when the D-Bus client exits.
+      // Avoid blocking an interactive selection on a second bluetoothctl process.
+      if (!options.signal?.aborted) await this.stopScan(2_000);
     }
-    return this.devices();
+    return options.signal?.aborted ? [...seen.values()] : this.devices();
   }
 
-  async stopScan(): Promise<void> { if (!this.dryRun) await this.bt(["scan", "off"], 8_000); }
+  async scan(mode: ScanMode, seconds: number): Promise<DeviceState[]> {
+    return this.scanLive(mode, seconds);
+  }
+
+  async stopScan(timeoutMs = 8_000): Promise<void> { if (!this.dryRun) await this.bt(["scan", "off"], timeoutMs); }
 
   async prepare(): Promise<void> {
     if (this.dryRun) return;

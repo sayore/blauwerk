@@ -4,8 +4,12 @@ export type ScanMode = "bredr" | "le" | "on";
 export interface DeviceState {
   mac: string;
   available: boolean;
+  addressType?: "public" | "random" | string;
   name?: string;
   alias?: string;
+  icon?: string;
+  class?: string;
+  legacyPairing?: boolean;
   paired: boolean;
   bonded?: boolean;
   trusted: boolean;

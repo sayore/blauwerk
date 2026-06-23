@@ -7,6 +7,8 @@ import { auditBluezConfig, type ConfigIssue } from "./config";
 import { Recovery, safeMatrix } from "./matrix";
 import { adapterPowerState, type AdapterPowerState } from "./power";
 import type { DeviceState } from "./types";
+import { DeviceRegistry } from "./registry";
+import { log } from "./log";
 
 export interface DeviceGroups {
   known: DeviceState[];
@@ -29,8 +31,9 @@ export function parseDeviceSelection(value: string): number | undefined {
   return match ? Number(match[1]) - 1 : undefined;
 }
 
-function label(device: DeviceState): string {
-  return device.alias ?? device.name ?? device.mac;
+function label(device: DeviceState, registry?: DeviceRegistry): string {
+  const regDev = registry?.get(device.mac);
+  return device.alias ?? device.name ?? regDev?.alias ?? regDev?.name ?? device.mac;
 }
 
 function actionable(notices: DeviceNotice[]): DeviceNotice[] {
@@ -46,13 +49,17 @@ async function enrich(bluez: Bluez, devices: DeviceState[]): Promise<DeviceState
   return Promise.all(devices.map(device => bluez.info(device.mac).catch(() => device)));
 }
 
-function printDeviceList(title: string, devices: DeviceState[], start: number): number {
+function printDeviceList(title: string, devices: DeviceState[], start: number, registry?: DeviceRegistry): number {
   console.log(`${title}:`);
   if (!devices.length) console.log("  (none)");
   devices.forEach((device, offset) => {
     const notices = adviseDevice(device);
     const state = device.connected ? "connected" : device.paired ? "paired" : "seen";
-    console.log(` ${start + offset}. ${label(device)}  (${state})${badge(notices)}`);
+    const name = label(device, registry);
+    const regDev = registry?.get(device.mac);
+    const category = regDev?.category ?? "unknown";
+    const catBadge = category !== "unknown" ? ` [${category.toUpperCase()}]` : "";
+    console.log(` ${start + offset}. ${name}${catBadge}  (${state})${badge(notices)}`);
   });
   console.log();
   return start + devices.length;
@@ -63,6 +70,7 @@ async function liveDiscovery(bluez: Bluez, known: DeviceState[], seconds: number
   selected?: DeviceState;
   quit: boolean;
 }> {
+  const registry = new DeviceRegistry();
   const knownByMac = new Map(known.map(device => [device.mac, device]));
   const floating = new Map<string, DeviceState>();
   const controller = new AbortController();
@@ -84,10 +92,23 @@ async function liveDiscovery(bluez: Bluez, known: DeviceState[], seconds: number
   const add = (device: DeviceState) => {
     if (knownByMac.has(device.mac)) return;
     const previous = floating.get(device.mac);
-    floating.set(device.mac, { ...previous, ...device, name: device.name ?? previous?.name });
+    
+    // Record to registry to merge and classify
+    registry.record(device);
+    const regDev = registry.get(device.mac);
+    const resolvedName = device.alias ?? device.name ?? regDev?.alias ?? regDev?.name ?? device.mac;
+    const category = regDev?.category ?? "unknown";
+    const catBadge = category !== "unknown" ? ` [${category.toUpperCase()}]` : "";
+
+    floating.set(device.mac, { 
+      ...previous, 
+      ...device, 
+      name: device.name ?? previous?.name ?? regDev?.name 
+    });
+
     if (!previous) {
       const number = knownByMac.size + floating.size;
-      printAbovePrompt(` ${number}. ${label(device)}  (found)`);
+      printAbovePrompt(` ${number}. ${resolvedName}${catBadge}  (found)`);
     }
   };
 
@@ -111,7 +132,7 @@ async function liveDiscovery(bluez: Bluez, known: DeviceState[], seconds: number
       settled = true;
       clearLine(process.stdout, 0);
       cursorTo(process.stdout, 0);
-      console.log(`Selected: ${label(selected)}; stopping discovery...`);
+      console.log(`Selected: ${label(selected, registry)}; stopping discovery...`);
       controller.abort();
       settleSelection({ selected, quit: false });
       return;
@@ -166,9 +187,9 @@ function printHostChecks(power?: AdapterPowerState, configIssues: ConfigIssue[] 
   console.log();
 }
 
-function printSelection(device: DeviceState, notices: DeviceNotice[]): void {
+function printSelection(device: DeviceState, notices: DeviceNotice[], registry?: DeviceRegistry): void {
   const caps = capabilities(device);
-  console.log(`\nSelected: ${label(device)} (${device.mac})`);
+  console.log(`\nSelected: ${label(device, registry)} (${device.mac})`);
   console.log(`State: paired=${device.paired} bonded=${device.bonded ?? "unknown"} trusted=${device.trusted} connected=${device.connected}`);
   console.log(`Capabilities: ${caps.labels.join(", ") || "unknown / proprietary"}`);
   console.log(`Intents: ${caps.intents.join(", ") || "unknown"}`);
@@ -179,6 +200,16 @@ function printSelection(device: DeviceState, notices: DeviceNotice[]): void {
   notices.forEach((notice, index) => console.log(` ${index + 1}. [${notice.severity}] ${notice.title}`));
 }
 
+function ask(query: string): Promise<string> {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  return new Promise(resolve => {
+    rl.question(query, answer => {
+      rl.close();
+      resolve(answer);
+    });
+  });
+}
+
 export async function runDashboard(bluez: Bluez, options: {
   scanSeconds?: number;
   scan?: boolean;
@@ -187,17 +218,24 @@ export async function runDashboard(bluez: Bluez, options: {
   connectTimeoutMs?: number;
   bondWaitMs?: number;
 } = {}): Promise<void> {
+  const registry = new DeviceRegistry();
   const interactive = Boolean(process.stdin.isTTY && !options.json);
   const [cachedRows, configIssues, power] = await Promise.all([
     bluez.devices(), auditBluezConfig().catch(() => []), Promise.resolve().then(() => adapterPowerState()).catch(() => undefined),
   ]);
+  
+  // Record cached devices to registry to ensure they are tracked
+  for (const row of cachedRows) {
+    registry.record(row);
+  }
+
   const cached = await enrich(bluez, cachedRows);
   let groups = partitionDevices(cached, []);
 
   if (!options.json) {
     console.log("[Blauwerk]\n");
     printHostChecks(power, configIssues);
-    printDeviceList("Known devices", groups.known, 1);
+    printDeviceList("Known devices", groups.known, 1, registry);
   }
 
   let selected: DeviceState | undefined;
@@ -220,12 +258,12 @@ export async function runDashboard(bluez: Bluez, options: {
     return;
   }
 
-  if (!interactive || options.scan === false) printDeviceList("Found floating around blue air", groups.floating, groups.known.length + 1);
+  if (!interactive || options.scan === false) printDeviceList("Found floating around blue air", groups.floating, groups.known.length + 1, registry);
   const all = [...groups.known, ...groups.floating];
   if (!interactive || !all.length) return;
 
   if (!selected) {
-    const answer = prompt("Select device number (empty to quit):")?.trim();
+    const answer = (await ask("Select device number (empty to quit): ")).trim();
     if (!answer) return;
     selected = all[Number(answer) - 1];
   }
@@ -234,11 +272,36 @@ export async function runDashboard(bluez: Bluez, options: {
   let device = await bluez.info(selected.mac);
   const audio = supportsPlayback(device) ? await new AudioManager().state(device.mac) : undefined;
   const notices = adviseDevice(device, { audio, power, configIssues });
-  printSelection(device, notices);
+  printSelection(device, notices, registry);
+
+  let probeTimer: ReturnType<typeof setTimeout> | undefined;
+  const isAnonymous = !device.name || device.name === device.mac;
+  if (isAnonymous) {
+    probeTimer = setTimeout(() => {
+      log("dashboard.lazy-probe.start", { mac: device.mac });
+      bluez.connect(device.mac, undefined, 10000)
+        .then(() => bluez.disconnect(device.mac))
+        .then(() => bluez.info(device.mac))
+        .then(freshDevice => {
+          if (freshDevice.name && freshDevice.name !== freshDevice.mac) {
+            registry.record(freshDevice);
+            console.log(`\n\n[Blauwerk] Lazy probe resolved device identity: ${freshDevice.name} (${freshDevice.mac})`);
+            device = freshDevice;
+          }
+        })
+        .catch(() => {});
+    }, 1500);
+  }
 
   while (true) {
     const recoveryAction = device.bonded === false ? "[r]ebond" : "[r]ecover";
-    const choice = prompt(`Check number, [c]onnect, ${recoveryAction}, [a]udio, [x] disconnect, [q]uit:`)?.trim().toLowerCase();
+    const choice = (await ask(`Check number, [c]onnect, ${recoveryAction}, [a]udio, [x] disconnect, [q]uit: `)).trim().toLowerCase();
+    
+    if (probeTimer) {
+      clearTimeout(probeTimer);
+      probeTimer = undefined;
+    }
+
     if (!choice || choice === "q") return;
     if (/^\d+$/.test(choice)) {
       const notice = notices[Number(choice) - 1];
@@ -263,7 +326,7 @@ export async function runDashboard(bluez: Bluez, options: {
         continue;
       }
       if (choice === "r" && device.bonded === false) {
-        const confirmed = (prompt("Rebond may briefly interrupt working audio. Continue? [y/N]") ?? "n").trim().toLowerCase() === "y";
+        const confirmed = (await ask("Rebond may briefly interrupt working audio. Continue? [y/N]: ")).trim().toLowerCase() === "y";
         if (!confirmed) continue;
       }
       if (!device.paired || choice === "r") {

@@ -220,6 +220,7 @@ export class Bluez {
     if (!this.selectedAdapter) {
       await this.resolveAdapter().catch(() => {});
     }
+    await this.hardenAdapter().catch(() => {});
     if (mode === "le" && !await this.hasAdapterCapability("le")) {
       throw new Error(`Controller ${this.selectedAdapter || ""} does not support Low Energy (LE) scans`);
     }
@@ -432,5 +433,11 @@ export class Bluez {
       output["audio_conflicts"] = `pulseaudio: ${conflicts.pulseaudio ? "active" : "inactive"}\npipewire: ${conflicts.pipewire ? "active" : "inactive"}\nconflict: ${conflicts.conflict ? "YES" : "NO"}`;
     }
     return output;
+  }
+
+  async hardenAdapter(): Promise<void> {
+    if (this.dryRun) return;
+    await this.bt(["discoverable", "off"], 8_000);
+    await this.bt(["pairable", "off"], 8_000);
   }
 }

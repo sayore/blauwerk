@@ -1,6 +1,6 @@
 {
   "name": "blauwerk",
-  "version": "0.4.5",
+  "version": "0.4.6",
   "private": true,
   "type": "module",
   "bin": {
@@ -10,7 +10,7 @@
   "scripts": {
     "start": "bun run src/cli.ts",
     "check": "bunx tsc --noEmit",
-    "test": "bun test"
+    "test": "bun test --parallel=1"
   },
   "devDependencies": {
     "@types/bun": "latest",

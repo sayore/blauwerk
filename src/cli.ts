@@ -9,8 +9,10 @@ import { logPath } from "./log";
 import { aggressiveMatrix, healthy, Recovery, safeMatrix } from "./matrix";
 import { failureScenarios, scenarioCoverage } from "./scenarios";
 import { runSimulation } from "./simulate";
+import { DeviceRegistry } from "./registry";
+import { runDaemon, installDaemon, startDaemon, stopDaemon, getDaemonStatus } from "./daemon";
 
-const VERSION = "0.4.5";
+const VERSION = "0.4.6";
 const args = Bun.argv.slice(2);
 const command = args[0]?.startsWith("-") ? "dashboard" : (args.shift() ?? "dashboard");
 const flag = (name: string) => args.includes(name);
@@ -40,6 +42,12 @@ Usage:
   blauwerk power [--fix]
   blauwerk coverage [--json]
   blauwerk simulate TYPE              # run simulated recovery (stale-link-key, multipoint-conflict, pairing-agent)
+  blauwerk registry [--json]          # list historically seen devices
+  blauwerk daemon --run               # run background scanner in foreground
+  blauwerk daemon --install           # install background scanner systemd user service
+  blauwerk daemon --start             # enable & start background scanner service
+  blauwerk daemon --stop              # disable & stop background scanner service
+  blauwerk daemon --status            # check background scanner service status
 
 Options:
   --mac MAC             target device
@@ -57,6 +65,8 @@ Options:
   --json                 machine-readable output
   --yes                  skip pairing-mode confirmation
   --no-scan              show known devices without discovery
+  --interval N           daemon scan interval in seconds (default 300)
+  --seconds N            daemon scan duration in seconds (default 30)
 
 Recovery is convergent: already satisfied state is retained, privileged
 escalations run at most once, and cache purge requires --aggressive.
@@ -237,6 +247,45 @@ async function main(): Promise<void> {
         throw new Error(`Unknown simulation type: ${type}. Use: stale-link-key, multipoint-conflict, or pairing-agent`);
       }
       return runSimulation(type);
+    }
+    case "registry": {
+      const registry = new DeviceRegistry();
+      const list = registry.list().sort((a, b) => new Date(b.lastSeen).getTime() - new Date(a.lastSeen).getTime());
+      if (json) return print(list);
+      if (list.length === 0) {
+        console.log("No devices in registry.");
+        return;
+      }
+      console.log(`${"LAST SEEN".padEnd(20)} ${"MAC".padEnd(17)}  ${"CAT".padEnd(9)}  ${"NAME / ALIAS".padEnd(30)}  CAPABILITIES`);
+      for (const dev of list) {
+        const lastSeenStr = dev.lastSeen.replace("T", " ").substring(0, 19);
+        const catBadge = `[${dev.category.toUpperCase()}]`.padEnd(9);
+        const name = dev.alias ?? dev.name ?? "unknown";
+        console.log(`${lastSeenStr.padEnd(20)} ${dev.mac}  ${catBadge}  ${name.slice(0, 30).padEnd(30)}  ${dev.capabilities.join(", ") || "unknown"}`);
+      }
+      return;
+    }
+    case "daemon": {
+      if (flag("--run")) {
+        const interval = number("--interval", 300);
+        const scanSecs = number("--seconds", 30);
+        return runDaemon(interval, scanSecs);
+      }
+      if (flag("--install")) {
+        const interval = number("--interval", 300);
+        const scanSecs = number("--seconds", 30);
+        return installDaemon(interval, scanSecs);
+      }
+      if (flag("--start")) {
+        return startDaemon();
+      }
+      if (flag("--stop")) {
+        return stopDaemon();
+      }
+      if (flag("--status")) {
+        return print(await getDaemonStatus());
+      }
+      throw new Error("Specify one of: --run, --install, --start, --stop, --status for daemon command");
     }
     default: throw new Error(`Unknown command: ${command}`);
   }

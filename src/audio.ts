@@ -97,7 +97,9 @@ export class AudioManager {
     log("audio.cycle-profile", { cardName });
     await run(["pactl", "set-card-profile", cardName, "off"], { allowFailure: true, timeoutMs: 8_000 });
     await Bun.sleep(1_000);
-    const profile = state.availableProfiles.find(name => /^a2dp-sink-?/.test(name));
+    // Fallback to standard SBC codec profile if available to ensure audio stability under interference
+    const sbcProfile = state.availableProfiles.find(name => /sbc/i.test(name));
+    const profile = sbcProfile || state.availableProfiles.find(name => /^a2dp-sink(?:-|$)/.test(name));
     if (profile) {
       await run(["pactl", "set-card-profile", cardName, profile], { allowFailure: true, timeoutMs: 8_000 });
     }

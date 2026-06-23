@@ -28,4 +28,9 @@ describe("device advisor", () => {
     const notices = adviseDevice(device({ paired: false, bonded: false, uuids: ["Vendor (12345678-1234-5678-1234-567812345678)"] }));
     expect(notices.map(notice => notice.id)).toContain("capabilities-pending");
   });
+
+  test("warns about moderate to poor signal RF/USB 3.0 interference", () => {
+    const notices = adviseDevice(device({ rssi: -78 }));
+    expect(notices.map(notice => notice.id)).toContain("rf-interference");
+  });
 });

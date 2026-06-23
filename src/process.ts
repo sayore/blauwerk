@@ -14,11 +14,17 @@ export async function run(argv: string[], options: {
   interactive?: boolean;
 } = {}): Promise<RunResult> {
   const timeoutMs = options.timeoutMs ?? 30_000;
+  const env = { ...Bun.env, ...options.env };
+  if (env.DBUS_SESSION_BUS_ADDRESS === undefined && typeof process.getuid === "function") {
+    const uid = process.getuid();
+    env.DBUS_SESSION_BUS_ADDRESS = `unix:path=/run/user/${uid}/bus`;
+  }
+
   const child = Bun.spawn(argv, {
     stdin: options.interactive || options.input !== undefined ? "pipe" : "ignore",
     stdout: "pipe",
     stderr: "pipe",
-    env: { ...Bun.env, ...options.env },
+    env,
   });
 
   let onData: ((chunk: any) => void) | undefined;

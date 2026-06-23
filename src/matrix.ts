@@ -26,6 +26,7 @@ export function usable(state: DeviceState): boolean {
 
 export class Recovery {
   private completed = new Set<string>();
+  private targetSeenInPreflight = false;
   constructor(private readonly bluez: Bluez, private readonly options: {
     scanSeconds: number;
     pairTimeoutMs: number;
@@ -50,8 +51,21 @@ export class Recovery {
     }
     if (!state.trusted) await this.bluez.trust(mac);
     if (!state.connected) {
+      let connectError: any = null;
       await this.bluez.connect(mac, undefined, this.options.connectTimeoutMs)
-        .catch(error => log("connect.failed", { profile: "default", error: String(error) }));
+        .catch(error => {
+          connectError = error;
+          log("connect.failed", { profile: "default", error: String(error) });
+        });
+      if (connectError && this.targetSeenInPreflight) {
+        const errMsg = String(connectError);
+        if (/org\.bluez\.Error\.Failed|Host is down|Connection timed out/i.test(errMsg)) {
+          log("recovery.stop", {
+            reason: "multipoint-conflict",
+            message: "Device was seen advertising in preflight scan but refused to connect (page timeout). This signature typically indicates that the device is already connected to another host (like a phone). Disconnect it from other hosts and try again."
+          });
+        }
+      }
       const deadline = Date.now() + 10_000;
       do {
         state = await this.bluez.info(mac);
@@ -96,6 +110,9 @@ export class Recovery {
       },
     });
     log("scan.end", { devices: devices.length, targetSeen, stoppedEarly: targetSeen });
+    if (targetSeen) {
+      this.targetSeenInPreflight = true;
+    }
     return { devices, targetSeen };
   }
 

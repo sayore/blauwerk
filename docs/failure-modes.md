@@ -51,9 +51,9 @@ working.
 | Unknown device name | MAC shown | selectable | handled |
 | Scan filter misses passive advertisements | no result | general scan fallback | partial: passive/active scan policies |
 | Weak or unstable signal | RSSI snapshot | displayed when available | partial: trend and proximity warning |
-| 2.4 GHz / USB 3 interference | poor RSSI and retries | not classified | planned: environmental warning |
+| 2.4 GHz / USB 3 interference | poor RSSI and retries | RSSI warning in advisor | handled |
 | Device changes identity after factory reset | old MAC no longer appears | hint-based scan can find name | partial: suggest identity replacement |
-| Device already connected to another host | remote page/auth failures | generic error | planned: multipoint/other-host diagnosis |
+| Device already connected to another host | remote page/auth failures | multipoint signature check | handled |
 | Multipoint slots are full | repeated remote rejection | generic error | planned: explain device-side slot cleanup |
 
 ## Pairing, bonding, and security
@@ -110,7 +110,7 @@ working.
 | A2DP transport Acquire fails | currently only journal evidence | WirePlumber & profile resets | handled |
 | Transport is busy | connect error | serialized retry | partial |
 | No common codec | endpoint negotiation failure | no codec diagnosis | planned: codec intersection and SBC fallback |
-| High-quality codec is unstable | repeated transport loss | no codec pinning | planned: stability-first fallback |
+| High-quality codec is unstable | repeated transport loss | fallback SBC profile cycling | handled |
 | LE Audio device lacks BAP support | BAP UUID/role | not classified | planned |
 | Headset supports music but no microphone | UUID/profile inventory | capability label is incomplete | planned: input/output intent verification |
 | HFP/HSP backend missing | no headset profile | not diagnosed | planned: WirePlumber backend check |
@@ -168,7 +168,7 @@ working.
 | Invalid BlueZ config | config audit | backed-up targeted fix | handled for known settings |
 | Kernel regression | compare kernel/boot metadata | manual comparison | planned: diagnostic bundle comparison |
 | PulseAudio and PipeWire conflict | process/service inventory | process collision diagnostics | handled |
-| No user D-Bus/session | command failures | generic audio error | planned: headless/system mode |
+| No user D-Bus/session | command failures | automatic DBUS address detection | handled |
 | Flatpak/container blocks Bluetooth or audio | bus/portal errors | generic failure | planned: sandbox-aware hint |
 | Polkit/sudo unavailable | privileged action failure | `--no-sudo` and error | partial: polkit helper |
 | Multiple users/seats compete for Bluetooth audio | logind/seat and monitor state | not modeled | planned |

@@ -53,6 +53,10 @@ export function adviseDevice(
     id: "weak-signal", severity: "warning", title: `Weak signal (${device.rssi} dBm)`,
     detail: "Pairing and profile negotiation may fail intermittently. Move the device closer and avoid USB 3 / 2.4 GHz interference.",
   });
+  if (device.rssi !== undefined && device.rssi < -75) add({
+    id: "rf-interference", severity: "warning", title: `Moderate to poor signal (${device.rssi} dBm)`,
+    detail: "High probability of 2.4 GHz spectrum crowding or USB 3.0 controller port interference. Consider using a USB extension cable for your Bluetooth dongle to isolate it from host USB 3.0 ports.",
+  });
   if (device.legacyPairing) add({
     id: "legacy-pairing", severity: "info", title: "Legacy PIN pairing",
     detail: "This device may require a fixed PIN such as 0000 or 1234 and a different pairing agent.",

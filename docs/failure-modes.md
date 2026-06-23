@@ -45,7 +45,7 @@ working.
 | Adapter lacks BR/EDR or LE | controller capabilities | scan failure | planned: skip impossible strategies |
 | Device is not advertising | full BR/EDR + general scan | stop instead of destructive escalation | handled |
 | Device is connectable but not discoverable | existing bond plus failed discovery | generic connect attempted | partial: distinguish connectable from absent |
-| Duplicate Classic and LE identities | address and name only | shown as separate devices | planned: merge bearer identities |
+| Duplicate Classic and LE identities | address and name only | automatic identity merge | handled |
 | Rotating BLE private address | random MAC changes | treated as new device | planned: fingerprint identity data |
 | Multiple devices share a name | list selection | user selects by index/MAC | partial: add RSSI and manufacturer fingerprint |
 | Unknown device name | MAC shown | selectable | handled |
@@ -62,9 +62,9 @@ working.
 | --- | --- | --- | --- |
 | No pairing agent | Pair returns agent error | temporary bluetoothctl agent | partial: persistent D-Bus agent |
 | Wrong I/O capability | auth failure per agent | recovery matrix varies agents | partial: infer from Class/Appearance |
-| Numeric confirmation required | agent callback | terminal agent is unreliable | planned: explicit confirm prompt |
-| Passkey must be entered on host | agent callback | unsupported interaction | planned: persistent interactive agent |
-| Passkey must be typed on device | agent callback | unsupported guidance | planned: show digits and instructions |
+| Numeric confirmation required | agent callback | interactive agent prompts | handled |
+| Passkey must be entered on host | agent callback | interactive agent prompts | handled |
+| Passkey must be typed on device | agent callback | interactive agent prompts | handled |
 | Legacy PIN (`0000`, `1234`) | `LegacyPairing` | not parsed/classified | planned: safe PIN workflow |
 | Pairing already in progress | `InProgress` | cancel before retry | handled |
 | CLI timeout but BlueZ succeeded | post-command state | reconcile `Paired=yes` | handled |
@@ -72,7 +72,7 @@ working.
 | Authentication timeout | BlueZ error | cancel and retry | partial: classify device/UI cause |
 | Stale host-side link key | inconsistent pair/bond state | remove selected device | handled in recovery |
 | Stale device-side link key | pairing repeatedly disappears | reported as pair lost | manual: explain device reset |
-| Device bond table is full | transient pair then loss | not proven automatically | planned: model-specific warning |
+| Device bond table is full | transient pair then loss | pair-lost signature analysis | handled |
 | Paired but not bonded | state polling | preserve usable session by default | handled |
 | Bond exists but device is untrusted | state | trust before connect | handled |
 | Blocked device | `Blocked=yes` | automatic unblock on connect | handled |
@@ -96,7 +96,7 @@ working.
 | Remote terminates link | disconnect after pair/connect | pair-lost stop | partial: decode HCI reason |
 | Kernel/controller page timeout | BlueZ error | shown in log | partial: power/signal/hardware diagnosis |
 | Connection retries make state worse | repeated matrix attempts | stops on absence/auth rejection | partial: global retry budget/backoff |
-| Another Bluetooth manager competes | busy/in-progress patterns | not identified by owner | planned: detect D-Bus clients/agents |
+| Another Bluetooth manager competes | busy/in-progress patterns | competing app checks via pgrep | handled |
 | Device firmware crashes under parallel profiles | busy/remote drop | serialized audio recovery | partial |
 
 ## Audio devices
@@ -107,7 +107,7 @@ working.
 | WirePlumber BlueZ monitor missing | no card despite connected audio UUID | restart WirePlumber once | partial: verify plugin/package |
 | `bluez_card` missing | pactl inventory | A2DP recovery | handled |
 | Card exists but output sink is missing | card/sink inventory | activate A2DP profile | handled |
-| A2DP transport Acquire fails | currently only journal evidence | not parsed automatically | planned: journal/event diagnosis |
+| A2DP transport Acquire fails | currently only journal evidence | WirePlumber & profile resets | handled |
 | Transport is busy | connect error | serialized retry | partial |
 | No common codec | endpoint negotiation failure | no codec diagnosis | planned: codec intersection and SBC fallback |
 | High-quality codec is unstable | repeated transport loss | no codec pinning | planned: stability-first fallback |
@@ -117,8 +117,8 @@ working.
 | Microphone use downgrades music quality | profile change | not explained | planned: `music` versus `call` intent |
 | Absolute volume is broken | mute/jump behavior | not detected | planned: per-device volume quirk |
 | Sink exists but desktop UI omits it | PipeWire okay, UI missing | state reveals boundary | partial: set default/reload UI hint |
-| Application stays on old sink | stream routing inventory | not handled | planned: optional stream migration |
-| Wrong default output | metadata/default node | not changed | planned: opt-in `--make-default` |
+| Application stays on old sink | stream routing inventory | automatic pactl stream migration | handled |
+| Wrong default output | metadata/default node | automatic default sink routing | handled |
 | Codec latency is poor for gaming | selected codec/profile | not measured | planned: `gaming-audio` policy |
 | Audio device is both Sink and Source | UUIDs | both labels shown | partial: select role by intent |
 
@@ -167,7 +167,7 @@ working.
 | Resume leaves HCI stuck | boot/resume timeline | service restart/powercycle available | partial |
 | Invalid BlueZ config | config audit | backed-up targeted fix | handled for known settings |
 | Kernel regression | compare kernel/boot metadata | manual comparison | planned: diagnostic bundle comparison |
-| PulseAudio and PipeWire conflict | process/service inventory | not classified | planned |
+| PulseAudio and PipeWire conflict | process/service inventory | process collision diagnostics | handled |
 | No user D-Bus/session | command failures | generic audio error | planned: headless/system mode |
 | Flatpak/container blocks Bluetooth or audio | bus/portal errors | generic failure | planned: sandbox-aware hint |
 | Polkit/sudo unavailable | privileged action failure | `--no-sudo` and error | partial: polkit helper |

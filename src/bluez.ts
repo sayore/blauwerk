@@ -77,16 +77,16 @@ export class Bluez {
     if (!await commandExists("bluetoothctl")) throw new Error("bluetoothctl is missing (install BlueZ)");
   }
 
-  private async bt(args: string[], timeoutMs = 30_000, agent?: Agent, skipSelect = false) {
+  private async bt(args: string[], timeoutMs = 30_000, agent?: Agent, skipSelect = false, interactive = false) {
     if (!skipSelect && !this.selectedAdapter && args[0] !== "list" && !(args[0] === "show" && args.length > 1)) {
       await this.resolveAdapter().catch(() => {});
     }
 
     if (!skipSelect && this.selectedAdapter && args[0] !== "list" && !(args[0] === "show" && args.length > 1)) {
       const commandStr = args.map(a => a.includes(" ") ? `"${a}"` : a).join(" ");
-      const input = `select ${this.selectedAdapter}\n${commandStr}\nquit\n`;
+      const input = interactive ? `select ${this.selectedAdapter}\n${commandStr}\n` : `select ${this.selectedAdapter}\n${commandStr}\nquit\n`;
       const argv = ["bluetoothctl", "--timeout", String(Math.max(1, Math.ceil(timeoutMs / 1_000))), ...(agent ? ["--agent", agent] : [])];
-      const result = await run(argv, { timeoutMs: timeoutMs + 2_000, allowFailure: true, input });
+      const result = await run(argv, { timeoutMs: timeoutMs + 2_000, allowFailure: true, input, interactive });
       if (result.exitCode === 0) {
         const combined = `${result.stdout}\n${result.stderr}`;
         if (
@@ -104,7 +104,7 @@ export class Bluez {
     }
 
     const argv = ["bluetoothctl", "--timeout", String(Math.max(1, Math.ceil(timeoutMs / 1_000))), ...(agent ? ["--agent", agent] : []), ...args];
-    return run(argv, { timeoutMs: timeoutMs + 2_000, allowFailure: true });
+    return run(argv, { timeoutMs: timeoutMs + 2_000, allowFailure: true, interactive });
   }
 
   async listAdapters(): Promise<{ mac: string; name: string; default: boolean }[]> {
@@ -180,6 +180,19 @@ export class Bluez {
     return rows.map(row => ({ ...parseDeviceInfo("", row[1]!), name: row[2]!.trim() }));
   }
 
+  async hasAdapterCapability(cap: "le" | "bredr"): Promise<boolean> {
+    if (this.dryRun) return true;
+    const adapter = await this.adapterMac().catch(() => null);
+    if (!adapter) return false;
+    const details = await this.bt(["show", adapter], 8_000, undefined, true).catch(() => null);
+    if (!details || details.exitCode !== 0) return false;
+    if (cap === "le") {
+      return /Roles:\s*central|Roles:\s*peripheral|Advertising Features:/i.test(details.stdout);
+    } else {
+      return !/LE-only/i.test(details.stdout);
+    }
+  }
+
   async scanLive(mode: ScanMode, seconds: number, options: {
     signal?: AbortSignal;
     onSeen?: (mac: string) => void;
@@ -190,6 +203,12 @@ export class Bluez {
     if (options.signal?.aborted) return [];
     if (!this.selectedAdapter) {
       await this.resolveAdapter().catch(() => {});
+    }
+    if (mode === "le" && !await this.hasAdapterCapability("le")) {
+      throw new Error(`Controller ${this.selectedAdapter || ""} does not support Low Energy (LE) scans`);
+    }
+    if (mode === "bredr" && !await this.hasAdapterCapability("bredr")) {
+      throw new Error(`Controller ${this.selectedAdapter || ""} does not support Classic (BR/EDR) scans`);
     }
     const duration = Math.max(1, seconds);
     const session = Bun.spawn(["bluetoothctl"], {
@@ -276,7 +295,8 @@ export class Bluez {
 
   async pair(mac: string, agent: Agent, timeoutMs: number): Promise<RunResult> {
     if (this.dryRun) return { argv: [], exitCode: 0, stdout: "dry-run", stderr: "", timedOut: false };
-    const result = await this.bt(["pair", normalizeMac(mac)], timeoutMs, agent);
+    const interactive = agent !== "NoInputNoOutput";
+    const result = await this.bt(["pair", normalizeMac(mac)], timeoutMs, agent, false, interactive);
     if (result.exitCode !== 0) throw new Error(`${result.timedOut ? "Pairing timed out\n" : ""}${result.stderr || result.stdout || "Pairing failed"}`);
     return result;
   }
@@ -349,6 +369,26 @@ export class Bluez {
     await Bun.sleep(2_000);
   }
 
+  async findCompetingManagers(): Promise<string[]> {
+    if (!await commandExists("pgrep")) return [];
+    const result = await run(["pgrep", "-l", "-f", "blueman|gnome-bluetooth|bluedevil"], { allowFailure: true, timeoutMs: 5_000 });
+    if (result.exitCode !== 0) return [];
+    return result.stdout.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+  }
+
+  async checkAudioConflicts(): Promise<{ pulseaudio: boolean; pipewire: boolean; conflict: boolean }> {
+    if (!await commandExists("pgrep")) return { pulseaudio: false, pipewire: false, conflict: false };
+    const pulseResult = await run(["pgrep", "-x", "pulseaudio"], { allowFailure: true, timeoutMs: 3_000 });
+    const pwResult = await run(["pgrep", "-x", "pipewire"], { allowFailure: true, timeoutMs: 3_000 });
+    const pulseaudio = pulseResult.exitCode === 0;
+    const pipewire = pwResult.exitCode === 0;
+    return {
+      pulseaudio,
+      pipewire,
+      conflict: pulseaudio && pipewire,
+    };
+  }
+
   async diagnostics(): Promise<Record<string, string>> {
     const output: Record<string, string> = {};
     if (!this.selectedAdapter) {
@@ -360,6 +400,14 @@ export class Bluez {
         const result = await run(argv, { allowFailure: true, timeoutMs: 10_000 });
         output[name] = `${result.stdout}${result.stderr}`.trim();
       }
+    }
+    const managers = await this.findCompetingManagers().catch(() => []);
+    if (managers.length > 0) {
+      output["competing_managers"] = managers.join("\n");
+    }
+    const conflicts = await this.checkAudioConflicts().catch(() => null);
+    if (conflicts) {
+      output["audio_conflicts"] = `pulseaudio: ${conflicts.pulseaudio ? "active" : "inactive"}\npipewire: ${conflicts.pipewire ? "active" : "inactive"}\nconflict: ${conflicts.conflict ? "YES" : "NO"}`;
     }
     return output;
   }

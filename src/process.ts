@@ -11,34 +11,79 @@ export async function run(argv: string[], options: {
   input?: string;
   allowFailure?: boolean;
   env?: Record<string, string>;
+  interactive?: boolean;
 } = {}): Promise<RunResult> {
   const timeoutMs = options.timeoutMs ?? 30_000;
-  const process = Bun.spawn(argv, {
-    stdin: options.input === undefined ? "ignore" : "pipe",
+  const child = Bun.spawn(argv, {
+    stdin: options.interactive || options.input !== undefined ? "pipe" : "ignore",
     stdout: "pipe",
     stderr: "pipe",
     env: { ...Bun.env, ...options.env },
   });
-  if (options.input !== undefined) {
-    const stdin = process.stdin;
-    if (!stdin) throw new Error(`Failed to open stdin for: ${argv.join(" ")}`);
-    stdin.write(options.input);
-    stdin.end();
+
+  let onData: ((chunk: any) => void) | undefined;
+  if (options.input !== undefined && child.stdin) {
+    child.stdin.write(options.input);
   }
+
+  if (options.interactive && child.stdin) {
+    globalThis.process.stdin.resume();
+    const stdinSink = child.stdin;
+    onData = (chunk) => {
+      stdinSink.write(chunk);
+    };
+    globalThis.process.stdin.on("data", onData);
+  } else if (options.input !== undefined && child.stdin) {
+    child.stdin.end();
+  }
+
+  let stdoutText = "";
+  let stderrText = "";
+  let readPromise = Promise.resolve();
+
+  const readStream = async (stream: ReadableStream<Uint8Array>, isStdout: boolean) => {
+    const reader = stream.getReader();
+    const decoder = new TextDecoder();
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      const text = decoder.decode(value);
+      if (isStdout) {
+        stdoutText += text;
+        if (options.interactive) globalThis.process.stdout.write(value);
+      } else {
+        stderrText += text;
+        if (options.interactive) globalThis.process.stderr.write(value);
+      }
+    }
+  };
+
+  readPromise = Promise.all([
+    readStream(child.stdout, true),
+    readStream(child.stderr, false)
+  ]).then(() => {});
+
   let timedOut = false;
   let forceTimer: ReturnType<typeof setTimeout> | undefined;
   const timer = setTimeout(() => {
     timedOut = true;
-    process.kill("SIGTERM");
-    forceTimer = setTimeout(() => process.kill("SIGKILL"), 2_000);
+    child.kill("SIGTERM");
+    forceTimer = setTimeout(() => child.kill("SIGKILL"), 2_000);
   }, timeoutMs);
+
   const [exitCode, stdout, stderr] = await Promise.all([
-    process.exited,
-    new Response(process.stdout).text(),
-    new Response(process.stderr).text(),
+    child.exited,
+    readPromise.then(() => stdoutText),
+    readPromise.then(() => stderrText),
   ]).finally(() => {
     clearTimeout(timer);
     if (forceTimer) clearTimeout(forceTimer);
+    if (options.interactive) {
+      if (onData) {
+        globalThis.process.stdin.removeListener("data", onData);
+      }
+      globalThis.process.stdin.pause();
+    }
   });
   const result = { argv, exitCode: timedOut ? 124 : exitCode, stdout, stderr, timedOut };
   if (result.exitCode !== 0 && !options.allowFailure) throw new CommandError(result);

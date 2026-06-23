@@ -15,7 +15,7 @@ function text(value: unknown): string | undefined {
 }
 
 export class AudioManager {
-  private async pactlJson(kind: "cards" | "sinks"): Promise<{ data: JsonObject[]; error?: string }> {
+  protected async pactlJson(kind: "cards" | "sinks"): Promise<{ data: JsonObject[]; error?: string }> {
     if (!await commandExists("pactl")) return { data: [], error: "pactl is missing" };
     const result = await run(["pactl", "-f", "json", "list", kind], { allowFailure: true, timeoutMs: 10_000 });
     if (result.exitCode !== 0) return { data: [], error: (result.stderr || result.stdout).trim() };
@@ -61,6 +61,48 @@ export class AudioManager {
     log("audio.profile", { card: state.cardName, profile, exitCode: result.exitCode });
   }
 
+  async setDefaultSink(sinkName: string): Promise<void> {
+    if (!await commandExists("pactl")) return;
+    log("audio.set-default-sink", { sinkName });
+    await run(["pactl", "set-default-sink", sinkName], { allowFailure: true, timeoutMs: 8_000 });
+  }
+
+  async rerouteAudioStreams(sinkName: string): Promise<void> {
+    if (!await commandExists("pactl")) return;
+    const result = await run(["pactl", "-f", "json", "list", "sink-inputs"], { allowFailure: true, timeoutMs: 8_000 });
+    if (result.exitCode !== 0) return;
+    try {
+      const inputs = JSON.parse(result.stdout);
+      if (Array.isArray(inputs)) {
+        for (const input of inputs) {
+          const index = input?.index;
+          if (index !== undefined) {
+            log("audio.reroute-stream", { index, toSink: sinkName });
+            await run(["pactl", "move-sink-input", String(index), sinkName], { allowFailure: true, timeoutMs: 5_000 });
+          }
+        }
+      }
+    } catch (e) {
+      log("audio.reroute.failed", { error: String(e) });
+    }
+  }
+
+  async postConnectReconcile(sinkName: string): Promise<void> {
+    await this.setDefaultSink(sinkName);
+    await this.rerouteAudioStreams(sinkName);
+  }
+
+  async cycleCardProfile(cardName: string, state: AudioState): Promise<void> {
+    if (!await commandExists("pactl")) return;
+    log("audio.cycle-profile", { cardName });
+    await run(["pactl", "set-card-profile", cardName, "off"], { allowFailure: true, timeoutMs: 8_000 });
+    await Bun.sleep(1_000);
+    const profile = state.availableProfiles.find(name => /^a2dp-sink-?/.test(name));
+    if (profile) {
+      await run(["pactl", "set-card-profile", cardName, profile], { allowFailure: true, timeoutMs: 8_000 });
+    }
+  }
+
   private async waitBluetooth(bluez: Bluez, mac: string, connected: boolean, seconds: number): Promise<boolean> {
     const deadline = Date.now() + seconds * 1_000;
     do {
@@ -84,12 +126,18 @@ export class AudioManager {
     });
     let state = await this.wait(mac, 5);
     log("audio.state", { ...state });
-    if (state.sinkFound) return state;
+    if (state.sinkFound && state.sinkName) {
+      await this.postConnectReconcile(state.sinkName);
+      return state;
+    }
 
     if (state.cardFound) {
       await this.activateA2dp(state);
       state = await this.wait(mac, 5);
-      if (state.sinkFound) return state;
+      if (state.sinkFound && state.sinkName) {
+        await this.postConnectReconcile(state.sinkName);
+        return state;
+      }
     }
 
     if (!state.serverAvailable) await bluez.restartAudio();
@@ -123,8 +171,16 @@ export class AudioManager {
       state = await this.wait(mac, 10);
     }
     if (state.cardFound && !state.sinkFound) {
+      log("audio.reconnect", { phase: "profile-cycle" });
+      await this.cycleCardProfile(state.cardName!, state);
+      state = await this.wait(mac, 5);
+    }
+    if (state.cardFound && !state.sinkFound) {
       await this.activateA2dp(state);
       state = await this.wait(mac, 5);
+    }
+    if (state.sinkFound && state.sinkName) {
+      await this.postConnectReconcile(state.sinkName);
     }
     bluetooth = await bluez.info(mac);
     state = { ...state, bluetoothConnected: bluetooth.connected, targetSeen, error: state.error ?? connectError };

@@ -132,6 +132,46 @@ export function capabilities(state: DeviceState): Capabilities {
   return result;
 }
 
+export function mergeDuplicateIdentities(devices: DeviceState[]): DeviceState[] {
+  const merged: DeviceState[] = [];
+  const seenNames = new Map<string, DeviceState>();
+  for (const device of devices) {
+    const nameKey = device.name?.toLowerCase() || device.alias?.toLowerCase();
+    if (!nameKey) {
+      merged.push(device);
+      continue;
+    }
+    const existing = seenNames.get(nameKey);
+    if (existing) {
+      const keepClassic = existing.addressType === "random" && device.addressType !== "random";
+      const keepPaired = !existing.paired && device.paired;
+      const preferDevice = keepClassic || keepPaired ? device : existing;
+      const discardDevice = preferDevice === existing ? device : existing;
+
+      preferDevice.uuids = [...new Set([...preferDevice.uuids, ...discardDevice.uuids])];
+      if (discardDevice.connected) preferDevice.connected = true;
+      if (discardDevice.paired) preferDevice.paired = true;
+      if (discardDevice.bonded) preferDevice.bonded = true;
+      if (discardDevice.trusted) preferDevice.trusted = true;
+
+      seenNames.set(nameKey, preferDevice);
+    } else {
+      seenNames.set(nameKey, device);
+    }
+  }
+  return [...seenNames.values()];
+}
+
+export function selectBearerForIntent(device: DeviceState, intent: DeviceIntent): "bredr" | "le" | "any" {
+  if (["music-playback", "music-source", "calls", "media-control"].includes(intent)) {
+    return "bredr";
+  }
+  if (["sensor", "le-audio", "battery"].includes(intent)) {
+    return "le";
+  }
+  return "any";
+}
+
 export class DeviceCatalog {
   constructor(private readonly backend: BluetoothBackend) {}
 
@@ -143,7 +183,8 @@ export class DeviceCatalog {
       devices = [...devices, ...bredr, ...all];
     }
     const unique = new Map(devices.map(device => [device.mac, device]));
-    return Promise.all([...unique.keys()].map(mac => this.backend.info(mac)));
+    const states = await Promise.all([...unique.keys()].map(mac => this.backend.info(mac)));
+    return mergeDuplicateIdentities(states);
   }
 
   async inspect(mac: string): Promise<{ device: DeviceState; capabilities: Capabilities }> {

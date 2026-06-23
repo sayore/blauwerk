@@ -7,9 +7,9 @@ describe("failure scenario registry", () => {
     expect(coverage).toMatchObject({
       total: 108,
       guidance: 108,
-      handled: 20,
+      handled: 30,
       partial: 25,
-      planned: 60,
+      planned: 50,
       manual: 3,
     });
     expect(new Set(failureScenarios.map(scenario => scenario.id)).size).toBe(108);

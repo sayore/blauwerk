@@ -193,7 +193,10 @@ export class Recovery {
         log("attempt.end", { paired: state.paired, bonded: state.bonded, connected: state.connected });
         if (this.mayStop(state)) return state;
         if (pairedThisAttempt && !state.paired) {
-          log("recovery.stop", { reason: "pair-lost", message: "remote or controller dropped the successful pairing" });
+          log("recovery.stop", {
+            reason: "pair-lost",
+            message: "Remote or controller dropped the successful pairing. This signature (transient pair followed by immediate loss) typically indicates that the remote device's bond/pairing table is full. Clear the pairing history on your device and try again."
+          });
           return state;
         }
       } catch (error) {

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { capabilities } from "../src/catalog";
+import { capabilities, mergeDuplicateIdentities, selectBearerForIntent } from "../src/catalog";
 import type { DeviceState } from "../src/types";
 
 describe("capability abstraction", () => {
@@ -29,5 +29,33 @@ describe("capability abstraction", () => {
     expect(report.composite).toBeTrue();
     expect(report.recognition).toEqual({ advertised: 4, recognized: 3, ratio: 0.75 });
     expect(report.unknownUuids).toEqual(["12345678-1234-5678-1234-567812345678"]);
+  });
+  test("merges duplicate Classic and LE identities", () => {
+    const devices: DeviceState[] = [
+      {
+        mac: "11:22:33:44:55:66", name: "Tribit Speaker", available: true, paired: true, trusted: true,
+        blocked: false, connected: true, addressType: "public", uuids: ["0000110b-0000-1000-8000-00805f9b34fb"], raw: "",
+      },
+      {
+        mac: "11:22:33:44:55:67", name: "Tribit Speaker", available: true, paired: false, trusted: false,
+        blocked: false, connected: false, addressType: "random", uuids: ["0000180f-0000-1000-8000-00805f9b34fb"], raw: "",
+      }
+    ];
+    const merged = mergeDuplicateIdentities(devices);
+    expect(merged.length).toBe(1);
+    const firstMerged = merged[0];
+    expect(firstMerged).toBeDefined();
+    if (firstMerged) {
+      expect(firstMerged.mac).toBe("11:22:33:44:55:66");
+      expect(firstMerged.paired).toBeTrue();
+      expect(firstMerged.uuids).toContain("0000110b-0000-1000-8000-00805f9b34fb");
+      expect(firstMerged.uuids).toContain("0000180f-0000-1000-8000-00805f9b34fb");
+    }
+  });
+
+  test("resolves correct bearer for intent", () => {
+    expect(selectBearerForIntent({} as any, "music-playback")).toBe("bredr");
+    expect(selectBearerForIntent({} as any, "sensor")).toBe("le");
+    expect(selectBearerForIntent({} as any, "file-transfer")).toBe("any");
   });
 });

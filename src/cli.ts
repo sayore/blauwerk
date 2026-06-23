@@ -8,6 +8,7 @@ import { runDashboard } from "./dashboard";
 import { logPath } from "./log";
 import { aggressiveMatrix, healthy, Recovery, safeMatrix } from "./matrix";
 import { failureScenarios, scenarioCoverage } from "./scenarios";
+import { runSimulation } from "./simulate";
 
 const VERSION = "0.2.0";
 const args = Bun.argv.slice(2);
@@ -38,6 +39,7 @@ Usage:
   blauwerk config [--fix]
   blauwerk power [--fix]
   blauwerk coverage [--json]
+  blauwerk simulate TYPE              # run simulated recovery (stale-link-key, multipoint-conflict, pairing-agent)
 
 Options:
   --mac MAC             target device
@@ -226,6 +228,13 @@ async function main(): Promise<void> {
       if (!state.paired) process.exitCode = 1;
       else if (!healthy(state) || (capabilities(state).audioSink && !audio?.sinkFound)) process.exitCode = 2;
       return;
+    }
+    case "simulate": {
+      const type = args[0] ?? "stale-link-key";
+      if (!["stale-link-key", "multipoint-conflict", "pairing-agent"].includes(type)) {
+        throw new Error(`Unknown simulation type: ${type}. Use: stale-link-key, multipoint-conflict, or pairing-agent`);
+      }
+      return runSimulation(type);
     }
     default: throw new Error(`Unknown command: ${command}`);
   }

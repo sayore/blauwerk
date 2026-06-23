@@ -10,7 +10,7 @@ import { aggressiveMatrix, healthy, Recovery, safeMatrix } from "./matrix";
 import { failureScenarios, scenarioCoverage } from "./scenarios";
 import { runSimulation } from "./simulate";
 
-const VERSION = "0.2.0";
+const VERSION = "0.4.4";
 const args = Bun.argv.slice(2);
 const command = args[0]?.startsWith("-") ? "dashboard" : (args.shift() ?? "dashboard");
 const flag = (name: string) => args.includes(name);

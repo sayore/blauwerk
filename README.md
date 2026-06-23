@@ -5,6 +5,20 @@ Bluetooth devices. The current Linux backend integrates BlueZ with
 WirePlumber/PipeWire while keeping platform-specific operations behind a small
 backend interface.
 
+## Quick Install
+
+Get up and running with a single command (requires no Node/npm/Bun, automatically downloads precompiled native binary):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/sayore/blauwerk/main/install.sh | sh
+```
+
+For quick system diagnostics check:
+```bash
+blauwerk diagnose
+```
+
+
 It treats recovery as a convergent state machine: every step re-reads device
 state, preserves completed work, and escalates only as far as necessary.
 

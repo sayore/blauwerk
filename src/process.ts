@@ -12,6 +12,7 @@ export async function run(argv: string[], options: {
   allowFailure?: boolean;
   env?: Record<string, string>;
   interactive?: boolean;
+  onStdout?: (text: string, writeStdin: (chunk: string) => void) => void;
 } = {}): Promise<RunResult> {
   const timeoutMs = options.timeoutMs ?? 30_000;
   const env = { ...Bun.env, ...options.env };
@@ -21,7 +22,7 @@ export async function run(argv: string[], options: {
   }
 
   const child = Bun.spawn(argv, {
-    stdin: options.interactive || options.input !== undefined ? "pipe" : "ignore",
+    stdin: options.interactive || options.input !== undefined || options.onStdout !== undefined ? "pipe" : "ignore",
     stdout: "pipe",
     stderr: "pipe",
     env,
@@ -57,6 +58,10 @@ export async function run(argv: string[], options: {
       if (isStdout) {
         stdoutText += text;
         if (options.interactive) globalThis.process.stdout.write(value);
+        const stdin = child.stdin;
+        if (options.onStdout && stdin) {
+          options.onStdout(text, (chunk) => stdin.write(chunk));
+        }
       } else {
         stderrText += text;
         if (options.interactive) globalThis.process.stderr.write(value);

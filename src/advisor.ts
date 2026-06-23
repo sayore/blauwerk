@@ -1,3 +1,5 @@
+import { readdirSync, readFileSync, accessSync, constants } from "node:fs";
+import { join } from "node:path";
 import { capabilities } from "./catalog";
 import type { ConfigIssue } from "./config";
 import type { AdapterPowerState } from "./power";
@@ -86,6 +88,68 @@ export function adviseDevice(
     id: "unknown-capabilities", severity: "info", title: "No known capability profile",
     detail: "The device may use BLE GATT or a proprietary vendor protocol that Blauwerk cannot verify yet.",
   });
+
+  // Check LE Audio BAP support
+  const hasLEAudioPACS = device.uuids.some(uuid => uuid.startsWith("00001850-"));
+  const hasLEAudioBAP = device.uuids.some(uuid => uuid.startsWith("0000184e-"));
+  if (hasLEAudioPACS && !hasLEAudioBAP) add({
+    id: "le-audio-bap-missing", severity: "warning", title: "LE Audio BAP support is missing",
+    detail: "This device advertises LE Audio capabilities (PACS) but lacks BAP support (ASCS), which is required for streaming audio.",
+  });
+
+  // Check A2DP vs HFP/HSP (music vs call intent)
+  const hasA2DP = caps.audioSink;
+  const supportsHfpHsp = device.uuids.some(uuid => /111e|111f|1108|1112/i.test(uuid));
+  if (hasA2DP && !supportsHfpHsp) add({
+    id: "headset-no-microphone", severity: "info", title: "Headset lacks microphone profile",
+    detail: "This device supports high-quality music playback (A2DP) but does not expose any microphone profile (HFP/HSP). Two-way calls will use the host microphone.",
+  });
+
+  // Check WirePlumber HFP/HSP backend missing
+  if (context.audio?.cardFound && supportsHfpHsp) {
+    const hasHfpProfile = context.audio.availableProfiles.some(profile => /headset|handsfree|hfp|hsp/i.test(profile));
+    if (!hasHfpProfile) add({
+      id: "hfp-backend-missing", severity: "warning", title: "HFP/HSP audio backend is missing",
+      detail: "The headset supports calls, but no call profiles (HFP/HSP) are exposed in WirePlumber. Check if wireplumber native HFP or oFono is installed.",
+    });
+  }
+
+  // Check gamepad/input device sleep warnings
+  if (!device.connected && caps.humanInterface && device.paired) add({
+    id: "gamepad-idle-sleep", severity: "info", title: "Input device is disconnected",
+    detail: "Gamepads and keyboards often shut down automatically to save battery. Press a button on the device to wake it and trigger auto-reconnect.",
+  });
+
+  // Check hidraw read/write permissions
+  if (device.connected && caps.humanInterface) {
+    try {
+      const hidraws = readdirSync("/sys/class/hidraw");
+      let matchedNode: string | undefined = undefined;
+      const normalizedMac = device.mac.toLowerCase();
+      for (const node of hidraws) {
+        const ueventPath = join("/sys/class/hidraw", node, "device", "uevent");
+        try {
+          const content = readFileSync(ueventPath, "utf8").toLowerCase();
+          if (content.includes(normalizedMac) || content.includes(normalizedMac.replaceAll(":", ""))) {
+            matchedNode = node;
+            break;
+          }
+        } catch {}
+      }
+      if (matchedNode) {
+        const devPath = join("/dev", matchedNode);
+        try {
+          accessSync(devPath, constants.R_OK | constants.W_OK);
+        } catch {
+          add({
+            id: "hidraw-permission-denied", severity: "error", title: `Read/write permissions denied for ${devPath}`,
+            detail: `Your user cannot access the input device node ${devPath}. Custom controllers/gamepads may fail to report rumble or special buttons.`,
+            command: `echo 'KERNEL=="${matchedNode}", GROUP="input", MODE="0660"' | sudo tee /etc/udev/rules.d/99-blauwerk-hid.rules && sudo udevadm trigger`,
+          });
+        }
+      }
+    } catch {}
+  }
 
   return notices;
 }

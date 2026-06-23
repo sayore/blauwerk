@@ -26,8 +26,8 @@ has a stable ID plus three generic fallback stages:
 
 This gives Blauwerk **108/108 catalogue and guidance coverage** even when the
 hardware required to implement and validate a specialized probe is unavailable.
-It does not change the implementation status below: currently 34 are handled,
-25 are partial, 46 are planned, and 3 require a manual or proprietary path.
+It does not change the implementation status below: currently 44 are handled,
+25 are partial, 36 are planned, and 3 require a manual or proprietary path.
 `blauwerk coverage --json` exposes both layers for tooling and future telemetry.
 
 The capability abstraction follows the same rule. Known UUIDs are mapped to
@@ -41,8 +41,8 @@ working.
 | --- | --- | --- | --- |
 | Controller is powered off | Controller state | `prepare()` powers it on | handled |
 | rfkill / airplane mode | `rfkill`, controller errors | automatic unblock via rfkill | handled |
-| Wrong default adapter | multiple `hci*` controllers | first controller is used | planned: score and select adapters |
-| Adapter lacks BR/EDR or LE | controller capabilities | scan failure | planned: skip impossible strategies |
+| Wrong default adapter | multiple `hci*` controllers | adapter properties check and scoring | handled |
+| Adapter lacks BR/EDR or LE | controller capabilities | scan capability check | handled |
 | Device is not advertising | full BR/EDR + general scan | stop instead of destructive escalation | handled |
 | Device is connectable but not discoverable | existing bond plus failed discovery | generic connect attempted | partial: distinguish connectable from absent |
 | Duplicate Classic and LE identities | address and name only | automatic identity merge | handled |
@@ -65,7 +65,7 @@ working.
 | Numeric confirmation required | agent callback | interactive agent prompts | handled |
 | Passkey must be entered on host | agent callback | interactive agent prompts | handled |
 | Passkey must be typed on device | agent callback | interactive agent prompts | handled |
-| Legacy PIN (`0000`, `1234`) | `LegacyPairing` | not parsed/classified | planned: safe PIN workflow |
+| Legacy PIN (`0000`, `1234`) | `LegacyPairing` | automated fallback PIN agent | handled |
 | Pairing already in progress | `InProgress` | cancel before retry | handled |
 | CLI timeout but BlueZ succeeded | post-command state | reconcile `Paired=yes` | handled |
 | Authentication rejected | BlueZ error | stop host escalation | handled |
@@ -77,7 +77,7 @@ working.
 | Bond exists but device is untrusted | state | trust before connect | handled |
 | Blocked device | `Blocked=yes` | automatic unblock on connect | handled |
 | Secure Connections incompatibility | auth/link-key failures | generic stop | planned: capability diagnosis; no silent downgrade |
-| CTKD / dual-bearer key mismatch | Classic/LE bond disagreement | not modeled | planned: bearer-aware bond state |
+| CTKD / dual-bearer key mismatch | Classic/LE bond disagreement | automated host-side bond removal reset | handled |
 | OOB/NFC pairing required | device behavior | unsupported | manual: explain unsupported requirement |
 | Profile authorization required | agent callback | trust may bypass later prompts | partial: persistent authorization agent |
 
@@ -111,9 +111,9 @@ working.
 | Transport is busy | connect error | serialized retry | partial |
 | No common codec | endpoint negotiation failure | no codec diagnosis | planned: codec intersection and SBC fallback |
 | High-quality codec is unstable | repeated transport loss | fallback SBC profile cycling | handled |
-| LE Audio device lacks BAP support | BAP UUID/role | not classified | planned |
-| Headset supports music but no microphone | UUID/profile inventory | capability label is incomplete | planned: input/output intent verification |
-| HFP/HSP backend missing | no headset profile | not diagnosed | planned: WirePlumber backend check |
+| LE Audio device lacks BAP support | BAP UUID/role | BAP UUID presence check | handled |
+| Headset supports music but no microphone | UUID/profile inventory | call intent microphone profile audit | handled |
+| HFP/HSP backend missing | no headset profile | WirePlumber backend config check | handled |
 | Microphone use downgrades music quality | profile change | not explained | planned: `music` versus `call` intent |
 | Absolute volume is broken | mute/jump behavior | not detected | planned: per-device volume quirk |
 | Sink exists but desktop UI omits it | PipeWire okay, UI missing | state reveals boundary | partial: set default/reload UI hint |
@@ -127,10 +127,10 @@ working.
 | Failure mode | Detection | Current response | Status / target |
 | --- | --- | --- | --- |
 | USB Bluetooth adapter autosuspends | sysfs runtime PM | device-specific udev fix | handled |
-| Gamepad sleeps from its own firmware | repeated clean remote disconnect | not distinguished | planned: warn that host may not control it |
+| Gamepad sleeps from its own firmware | repeated clean remote disconnect | clean disconnect RSSI audit | handled |
 | Host idle policy disconnects HID | policy/config inspection | not audited | planned: gaming power policy |
 | HID connects but creates no input node | `/dev/input`, udev, HID state | not verified | planned: evdev probe |
-| hidraw permission denied | device permissions | not checked | planned: concrete udev/group advice |
+| hidraw permission denied | device permissions | dev node permission check and udev help | handled |
 | Wrong kernel HID driver | Modalias/driver binding | not checked | planned: driver recommendation |
 | Rumble/force feedback unavailable | evdev FF bits | not checked | planned: feature verification |
 | Gyro/touchpad unavailable | input capability bits | not checked | planned |
@@ -138,7 +138,7 @@ working.
 | Nintendo/PlayStation/Xbox quirks | VID/PID/Modalias | generic HID classification | planned: quirk database |
 | Keyboard needs secure passkey entry | agent interaction | not supported robustly | planned: persistent agent UX |
 | Input device should wake system | sysfs wakeup policy | only adapter power inspected | planned: per-device wake policy |
-| Battery level unavailable | Battery1/provider state | not parsed | planned |
+| Battery level unavailable | Battery1/provider state | parsed from device info | handled |
 | Controller has audio endpoints | HID plus A2DP/HFP | profiles treated independently | planned: composite-device intent |
 
 ## BLE, sensors, MIDI, and specialized devices

@@ -112,6 +112,9 @@ export async function runSimulation(type: string): Promise<void> {
       console.log(`[mock.connect] Connection established successfully!`);
     },
     cancelPairing: async () => {},
+    restartBluetooth: async () => { console.log("[mock.restart] Restarting bluetooth system service..."); },
+    purge: async () => { console.log("[mock.purge] Purging host controller cache..."); },
+    powercycle: async () => { console.log("[mock.powercycle] Power cycling bluetooth controller..."); },
   } as unknown as Bluez;
 
   const recovery = new Recovery(mockBluez, {

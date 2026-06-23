@@ -57,9 +57,15 @@ export class Recovery {
           connectError = error;
           log("connect.failed", { profile: "default", error: String(error) });
         });
-      if (connectError && this.targetSeenInPreflight) {
+      if (connectError) {
         const errMsg = String(connectError);
-        if (/org\.bluez\.Error\.Failed|Host is down|Connection timed out/i.test(errMsg)) {
+        if (state.paired && /AuthenticationFailed|Key missing|Link key|Authentication Failed/i.test(errMsg)) {
+          log("recovery.ctkd-mismatch", { mac, error: errMsg });
+          log("recovery.reset-ctkd", { message: "CTKD / dual-bearer key mismatch detected. Removing host-side bond to force fresh link key exchange." });
+          await this.bluez.disconnect(mac).catch(() => {});
+          await this.bluez.remove(mac).catch(() => {});
+          state = await this.bluez.info(mac);
+        } else if (this.targetSeenInPreflight && /org\.bluez\.Error\.Failed|Host is down|Connection timed out/i.test(errMsg)) {
           log("recovery.stop", {
             reason: "multipoint-conflict",
             message: "Device was seen advertising in preflight scan but refused to connect (page timeout). This signature typically indicates that the device is already connected to another host (like a phone). Disconnect it from other hosts and try again."
@@ -188,7 +194,13 @@ export class Recovery {
           await this.bluez.cancelPairing(mac).catch(() => {});
           pairedThisAttempt = true;
           try {
-            const result = await this.bluez.pair(mac, attempt.agent, this.options.pairTimeoutMs);
+            let pin: string | undefined = undefined;
+            if (state.legacyPairing) {
+              const pins = ["0000", "1234", "1111"];
+              pin = pins[index % pins.length];
+              log("recovery.legacy-pin-attempt", { mac, pin });
+            }
+            const result = await this.bluez.pair(mac, attempt.agent, this.options.pairTimeoutMs, pin);
             log("pair.result", {
               exitCode: result.exitCode,
               output: `${result.stdout}\n${result.stderr}`.trim().slice(-2_000),

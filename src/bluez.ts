@@ -20,6 +20,8 @@ export function parseDeviceInfo(raw: string, fallbackMac = "00:00:00:00:00:00"):
   const servicesResolved = value("ServicesResolved");
   const rssiValue = value("RSSI");
   const rssi = rssiValue?.match(/\((-?\d+)\)\s*$/)?.[1] ?? rssiValue?.match(/^-?\d+$/)?.[0];
+  const batteryValue = value("Battery Percentage");
+  const battery = batteryValue?.match(/\((\d+)\)\s*$/)?.[1] ?? batteryValue?.match(/^\d+$/)?.[0] ?? batteryValue?.match(/0x[0-9a-fA-F]+\s*\((\d+)\)/)?.[1];
   return {
     mac: headerMac ?? fallbackMac, available: !/not available/i.test(raw), addressType: header?.[2],
     name: value("Name"), alias: value("Alias"), icon: value("Icon"), class: value("Class"),
@@ -28,6 +30,7 @@ export function parseDeviceInfo(raw: string, fallbackMac = "00:00:00:00:00:00"):
     trusted: yes("Trusted"), blocked: yes("Blocked"), connected: yes("Connected"),
     servicesResolved: servicesResolved === undefined ? undefined : servicesResolved.toLowerCase() === "yes",
     rssi: rssi === undefined ? undefined : Number(rssi),
+    battery: battery === undefined ? undefined : Number(battery),
     uuids: [...raw.matchAll(/^\s*UUID:\s*(.+)$/gmi)].map(match => match[1]!.trim()), raw,
   };
 }
@@ -77,7 +80,14 @@ export class Bluez {
     if (!await commandExists("bluetoothctl")) throw new Error("bluetoothctl is missing (install BlueZ)");
   }
 
-  private async bt(args: string[], timeoutMs = 30_000, agent?: Agent, skipSelect = false, interactive = false) {
+  private async bt(
+    args: string[],
+    timeoutMs = 30_000,
+    agent?: Agent,
+    skipSelect = false,
+    interactive = false,
+    onStdout?: (text: string, writeStdin: (chunk: string) => void) => void
+  ) {
     if (!skipSelect && !this.selectedAdapter && args[0] !== "list" && !(args[0] === "show" && args.length > 1)) {
       await this.resolveAdapter().catch(() => {});
     }
@@ -86,7 +96,7 @@ export class Bluez {
       const commandStr = args.map(a => a.includes(" ") ? `"${a}"` : a).join(" ");
       const input = interactive ? `select ${this.selectedAdapter}\n${commandStr}\n` : `select ${this.selectedAdapter}\n${commandStr}\nquit\n`;
       const argv = ["bluetoothctl", "--timeout", String(Math.max(1, Math.ceil(timeoutMs / 1_000))), ...(agent ? ["--agent", agent] : [])];
-      const result = await run(argv, { timeoutMs: timeoutMs + 2_000, allowFailure: true, input, interactive });
+      const result = await run(argv, { timeoutMs: timeoutMs + 2_000, allowFailure: true, input, interactive, onStdout });
       if (result.exitCode === 0) {
         const combined = `${result.stdout}\n${result.stderr}`;
         if (
@@ -104,7 +114,7 @@ export class Bluez {
     }
 
     const argv = ["bluetoothctl", "--timeout", String(Math.max(1, Math.ceil(timeoutMs / 1_000))), ...(agent ? ["--agent", agent] : []), ...args];
-    return run(argv, { timeoutMs: timeoutMs + 2_000, allowFailure: true, interactive });
+    return run(argv, { timeoutMs: timeoutMs + 2_000, allowFailure: true, interactive, onStdout });
   }
 
   async listAdapters(): Promise<{ mac: string; name: string; default: boolean }[]> {
@@ -147,6 +157,11 @@ export class Bluez {
           if (/Discoverable:\s*yes/i.test(details.stdout)) score += 1;
           if (/Pairable:\s*yes/i.test(details.stdout)) score += 1;
           if (/Discovering:\s*yes/i.test(details.stdout)) score += 1;
+          
+          const hasLe = /Roles:\s*central|Roles:\s*peripheral|Advertising Features:/i.test(details.stdout);
+          const hasClassic = !/LE-only/i.test(details.stdout);
+          if (hasLe) score += 5;
+          if (hasClassic) score += 5;
         }
         if (score > maxScore) {
           maxScore = score;
@@ -293,10 +308,16 @@ export class Bluez {
     for (const args of [["power", "on"], ["pairable", "on"], ["scan", "off"]]) await this.bt(args);
   }
 
-  async pair(mac: string, agent: Agent, timeoutMs: number): Promise<RunResult> {
+  async pair(mac: string, agent: Agent, timeoutMs: number, legacyPin?: string): Promise<RunResult> {
     if (this.dryRun) return { argv: [], exitCode: 0, stdout: "dry-run", stderr: "", timedOut: false };
     const interactive = agent !== "NoInputNoOutput";
-    const result = await this.bt(["pair", normalizeMac(mac)], timeoutMs, agent, false, interactive);
+    const onStdout = legacyPin ? (text: string, writeStdin: (chunk: string) => void) => {
+      if (/Enter PIN code:/i.test(text)) {
+        log("agent.legacy-pin", { mac, pin: legacyPin });
+        writeStdin(`${legacyPin}\n`);
+      }
+    } : undefined;
+    const result = await this.bt(["pair", normalizeMac(mac)], timeoutMs, agent, false, interactive, onStdout);
     if (result.exitCode !== 0) throw new Error(`${result.timedOut ? "Pairing timed out\n" : ""}${result.stderr || result.stdout || "Pairing failed"}`);
     return result;
   }

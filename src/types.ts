@@ -17,6 +17,7 @@ export interface DeviceState {
   connected: boolean;
   servicesResolved?: boolean;
   rssi?: number;
+  battery?: number;
   uuids: string[];
   raw: string;
 }

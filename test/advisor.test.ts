@@ -33,4 +33,27 @@ describe("device advisor", () => {
     const notices = adviseDevice(device({ rssi: -78 }));
     expect(notices.map(notice => notice.id)).toContain("rf-interference");
   });
+
+  test("warns when LE Audio PACS is present but BAP is missing", () => {
+    const notices = adviseDevice(device({ uuids: ["00001850-0000-1000-8000-00805f9b34fb"] })); // PACS only
+    expect(notices.map(notice => notice.id)).toContain("le-audio-bap-missing");
+  });
+
+  test("warns when audio headset supports music but has no call/microphone UUIDs", () => {
+    const notices = adviseDevice(device({ uuids: ["0000110b-0000-1000-8000-00805f9b34fb"] })); // Audio Sink (A2DP)
+    expect(notices.map(notice => notice.id)).toContain("headset-no-microphone");
+  });
+
+  test("warns when HFP backend is missing in WirePlumber", () => {
+    const notices = adviseDevice(
+      device({ connected: true, uuids: ["0000110b-0000-1000-8000-00805f9b34fb", "0000111e-0000-1000-8000-00805f9b34fb"] }), // Sink + Handsfree
+      { audio: { serverAvailable: true, cardFound: true, sinkFound: true, availableProfiles: ["a2dp-sink"] } } // lacks headset profile
+    );
+    expect(notices.map(notice => notice.id)).toContain("hfp-backend-missing");
+  });
+
+  test("notifies when a paired gamepad is disconnected", () => {
+    const notices = adviseDevice(device({ connected: false, paired: true, uuids: ["00001124-0000-1000-8000-00805f9b34fb"] })); // HID profile
+    expect(notices.map(notice => notice.id)).toContain("gamepad-idle-sleep");
+  });
 });

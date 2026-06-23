@@ -85,7 +85,9 @@ function table(devices: Awaited<ReturnType<DeviceCatalog["list"]>>): void {
   console.log(`${"#".padEnd(3)} ${"MAC".padEnd(17)}  ${"P/B/C".padEnd(5)}  ${"NAME".padEnd(30)}  CAPABILITIES`);
   devices.forEach((device, index) => {
     const state = `${device.paired ? "P" : "-"}/${device.bonded ? "B" : "-"}/${device.connected ? "C" : "-"}`;
-    console.log(`${String(index + 1).padEnd(3)} ${device.mac}  ${state.padEnd(5)}  ${(device.alias ?? device.name ?? "unknown").slice(0, 30).padEnd(30)}  ${capabilities(device).labels.join(", ") || "unknown"}`);
+    const batteryText = device.battery !== undefined ? ` (${device.battery}%)` : "";
+    const name = `${device.alias ?? device.name ?? "unknown"}${batteryText}`;
+    console.log(`${String(index + 1).padEnd(3)} ${device.mac}  ${state.padEnd(5)}  ${name.slice(0, 30).padEnd(30)}  ${capabilities(device).labels.join(", ") || "unknown"}`);
   });
 }
 

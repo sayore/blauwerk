@@ -39,7 +39,13 @@ describe("BlueZ state parsing", () => {
       mac: "AC:B1:EE:71:A1:51", name: "Living Room",
     });
     expect(parseDiscoveryLine("[CHG] Device AC:B1:EE:71:A1:51 RSSI: 0xffffffc1 (-63)")).toEqual({
-      mac: "AC:B1:EE:71:A1:51",
+      mac: "AC:B1:EE:71:A1:51", rssi: -63,
+    });
+    expect(parseDiscoveryLine("[CHG] Device AC:B1:EE:71:A1:51 Class: 0x240404")).toEqual({
+      mac: "AC:B1:EE:71:A1:51", class: "0x240404",
+    });
+    expect(parseDiscoveryLine("[CHG] Device AC:B1:EE:71:A1:51 Icon: audio-card")).toEqual({
+      mac: "AC:B1:EE:71:A1:51", icon: "audio-card",
     });
   });
 

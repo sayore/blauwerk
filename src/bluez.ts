@@ -38,6 +38,9 @@ export function parseDeviceInfo(raw: string, fallbackMac = "00:00:00:00:00:00"):
 export interface DiscoveryEvent {
   mac: string;
   name?: string;
+  rssi?: number;
+  class?: string;
+  icon?: string;
 }
 
 export function parseDiscoveryLine(line: string): DiscoveryEvent | undefined {
@@ -46,9 +49,35 @@ export function parseDiscoveryLine(line: string): DiscoveryEvent | undefined {
   const mac = normalizeMac(added[1]!);
   const detail = added[2]?.trim();
   if (!detail) return { mac };
-  const property = detail.match(/^(?:Name|Alias):\s*(.+)$/i)?.[1]?.trim();
-  if (/^[A-Za-z]+(?:\.[A-Za-z]+)*:\s*/.test(detail) && !property) return { mac };
-  return { mac, name: property ?? detail };
+
+  const nameMatch = detail.match(/^(?:Name|Alias):\s*(.+)$/i);
+  if (nameMatch) {
+    return { mac, name: nameMatch[1]!.trim() };
+  }
+
+  const rssiMatch = detail.match(/^RSSI:\s*(?:0x[0-9a-fA-F]+\s*\((-?\d+)\)|(-?\d+))$/i);
+  if (rssiMatch) {
+    const val = rssiMatch[1] ?? rssiMatch[2];
+    if (val !== undefined) {
+      return { mac, rssi: Number(val) };
+    }
+  }
+
+  const classMatch = detail.match(/^Class:\s*(0x[0-9A-Fa-f]+|\d+)$/i);
+  if (classMatch) {
+    return { mac, class: classMatch[1]!.trim() };
+  }
+
+  const iconMatch = detail.match(/^Icon:\s*(.+)$/i);
+  if (iconMatch) {
+    return { mac, icon: iconMatch[1]!.trim() };
+  }
+
+  if (/^[A-Za-z]+(?:\.[A-Za-z]+)*:\s*/.test(detail)) {
+    return { mac };
+  }
+
+  return { mac, name: detail };
 }
 
 async function consumeLines(stream: ReadableStream<Uint8Array>, onLine?: (line: string) => void): Promise<string> {
@@ -238,10 +267,32 @@ export class Bluez {
       const event = parseDiscoveryLine(line);
       if (!event) return;
       options.onSeen?.(event.mac);
-      if (!event.name) return;
+
       const previous = seen.get(event.mac);
-      if (previous && previous.name === event.name) return;
-      const device = { ...parseDeviceInfo("", event.mac), name: event.name ?? previous?.name };
+      const name = event.name ?? previous?.name;
+      const alias = event.name ?? previous?.alias;
+      const rssi = event.rssi ?? previous?.rssi;
+      const devClass = event.class ?? previous?.class;
+      const icon = event.icon ?? previous?.icon;
+
+      // Only trigger updates if there is new information
+      const hasUpdate = !previous ||
+        (event.name !== undefined && previous.name !== event.name) ||
+        (event.rssi !== undefined && previous.rssi !== event.rssi) ||
+        (event.class !== undefined && previous.class !== event.class) ||
+        (event.icon !== undefined && previous.icon !== event.icon);
+
+      if (!hasUpdate) return;
+
+      const device: DeviceState = {
+        ...parseDeviceInfo("", event.mac),
+        name,
+        alias,
+        rssi,
+        class: devClass,
+        icon,
+      };
+
       seen.set(event.mac, device);
       options.onDevice?.(device);
     };

@@ -1,0 +1,19 @@
+{
+  "name": "blauwerk",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "blauwerk": "./src/cli.ts",
+    "bt-matrix": "./src/cli.ts"
+  },
+  "scripts": {
+    "start": "bun run src/cli.ts",
+    "check": "bunx tsc --noEmit",
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "latest"
+  }
+}

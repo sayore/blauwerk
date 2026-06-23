@@ -26,8 +26,8 @@ has a stable ID plus three generic fallback stages:
 
 This gives Blauwerk **108/108 catalogue and guidance coverage** even when the
 hardware required to implement and validate a specialized probe is unavailable.
-It does not change the implementation status below: currently 18 are handled,
-26 are partial, 61 are planned, and 3 require a manual or proprietary path.
+It does not change the implementation status below: currently 34 are handled,
+25 are partial, 46 are planned, and 3 require a manual or proprietary path.
 `blauwerk coverage --json` exposes both layers for tooling and future telemetry.
 
 The capability abstraction follows the same rule. Known UUIDs are mapped to

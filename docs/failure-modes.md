@@ -40,7 +40,7 @@ working.
 | Failure mode | Detection | Current response | Status / target |
 | --- | --- | --- | --- |
 | Controller is powered off | Controller state | `prepare()` powers it on | handled |
-| rfkill / airplane mode | `rfkill`, controller errors | shown by diagnostics | partial: offer safe unblock |
+| rfkill / airplane mode | `rfkill`, controller errors | automatic unblock via rfkill | handled |
 | Wrong default adapter | multiple `hci*` controllers | first controller is used | planned: score and select adapters |
 | Adapter lacks BR/EDR or LE | controller capabilities | scan failure | planned: skip impossible strategies |
 | Device is not advertising | full BR/EDR + general scan | stop instead of destructive escalation | handled |
@@ -75,7 +75,7 @@ working.
 | Device bond table is full | transient pair then loss | not proven automatically | planned: model-specific warning |
 | Paired but not bonded | state polling | preserve usable session by default | handled |
 | Bond exists but device is untrusted | state | trust before connect | handled |
-| Blocked device | `Blocked=yes` | displayed only | planned: explicit unblock action |
+| Blocked device | `Blocked=yes` | automatic unblock on connect | handled |
 | Secure Connections incompatibility | auth/link-key failures | generic stop | planned: capability diagnosis; no silent downgrade |
 | CTKD / dual-bearer key mismatch | Classic/LE bond disagreement | not modeled | planned: bearer-aware bond state |
 | OOB/NFC pairing required | device behavior | unsupported | manual: explain unsupported requirement |

@@ -67,7 +67,7 @@ const playbooks: Record<ScenarioCategory, Pick<FailureScenario, "observe" | "gui
 const seeds: Record<ScenarioCategory, readonly ScenarioSeed[]> = {
   discovery: [
     ["handled", "Controller is powered off"],
-    ["partial", "rfkill / airplane mode"],
+    ["handled", "rfkill / airplane mode"],
     ["planned", "Wrong default adapter"],
     ["planned", "Adapter lacks BR/EDR or LE"],
     ["handled", "Device is not advertising"],
@@ -99,7 +99,7 @@ const seeds: Record<ScenarioCategory, readonly ScenarioSeed[]> = {
     ["planned", "Device bond table is full"],
     ["handled", "Paired but not bonded"],
     ["handled", "Bond exists but device is untrusted"],
-    ["planned", "Blocked device"],
+    ["handled", "Blocked device"],
     ["planned", "Secure Connections incompatibility"],
     ["planned", "CTKD / dual-bearer key mismatch"],
     ["manual", "OOB/NFC pairing required"],

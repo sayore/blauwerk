@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { commandExists, run } from "./process";
 import type { Agent, DeviceState, RunResult, ScanMode } from "./types";
+import { log } from "./log";
 
 const MAC = /^[0-9A-F]{2}(?::[0-9A-F]{2}){5}$/;
 
@@ -69,15 +70,94 @@ async function consumeLines(stream: ReadableStream<Uint8Array>, onLine?: (line: 
 }
 
 export class Bluez {
+  private selectedAdapter?: string;
   constructor(private readonly dryRun = false, private readonly noSudo = false) {}
 
   async assertReady(): Promise<void> {
     if (!await commandExists("bluetoothctl")) throw new Error("bluetoothctl is missing (install BlueZ)");
   }
 
-  private async bt(args: string[], timeoutMs = 30_000, agent?: Agent) {
+  private async bt(args: string[], timeoutMs = 30_000, agent?: Agent, skipSelect = false) {
+    if (!skipSelect && !this.selectedAdapter && args[0] !== "list" && !(args[0] === "show" && args.length > 1)) {
+      await this.resolveAdapter().catch(() => {});
+    }
+
+    if (!skipSelect && this.selectedAdapter && args[0] !== "list" && !(args[0] === "show" && args.length > 1)) {
+      const commandStr = args.map(a => a.includes(" ") ? `"${a}"` : a).join(" ");
+      const input = `select ${this.selectedAdapter}\n${commandStr}\nquit\n`;
+      const argv = ["bluetoothctl", "--timeout", String(Math.max(1, Math.ceil(timeoutMs / 1_000))), ...(agent ? ["--agent", agent] : [])];
+      const result = await run(argv, { timeoutMs: timeoutMs + 2_000, allowFailure: true, input });
+      if (result.exitCode === 0) {
+        const combined = `${result.stdout}\n${result.stderr}`;
+        if (
+          /Failed to/i.test(combined) ||
+          /not available/i.test(combined) ||
+          /error:/i.test(combined) ||
+          /AuthenticationFailed/i.test(combined) ||
+          /Failed to connect/i.test(combined) ||
+          /Failed to pair/i.test(combined)
+        ) {
+          result.exitCode = 1;
+        }
+      }
+      return result;
+    }
+
     const argv = ["bluetoothctl", "--timeout", String(Math.max(1, Math.ceil(timeoutMs / 1_000))), ...(agent ? ["--agent", agent] : []), ...args];
     return run(argv, { timeoutMs: timeoutMs + 2_000, allowFailure: true });
+  }
+
+  async listAdapters(): Promise<{ mac: string; name: string; default: boolean }[]> {
+    const result = await this.bt(["list"], 8_000, undefined, true);
+    const lines = result.stdout.split(/\r?\n/);
+    const adapters: { mac: string; name: string; default: boolean }[] = [];
+    for (const line of lines) {
+      const match = line.match(/^Controller\s+([0-9A-F:]{17})\s+(.+?)(?:\s+\[default\])?\s*$/i);
+      if (match) {
+        adapters.push({
+          mac: normalizeMac(match[1]!),
+          name: match[2]!.trim(),
+          default: /\[default\]/i.test(line),
+        });
+      }
+    }
+    return adapters;
+  }
+
+  private async resolveAdapter(): Promise<string> {
+    if (this.selectedAdapter) return this.selectedAdapter;
+    try {
+      const adapters = await this.listAdapters();
+      const firstAdapter = adapters[0];
+      if (!firstAdapter) {
+        throw new Error("No Bluetooth controllers found");
+      }
+      if (adapters.length === 1) {
+        this.selectedAdapter = firstAdapter.mac;
+        return this.selectedAdapter;
+      }
+      let bestMac = firstAdapter.mac;
+      let maxScore = -1;
+      for (const adapter of adapters) {
+        let score = 0;
+        if (adapter.default) score += 5;
+        const details = await this.bt(["show", adapter.mac], 8_000, undefined, true).catch(() => null);
+        if (details && details.exitCode === 0) {
+          if (/Powered:\s*yes/i.test(details.stdout)) score += 10;
+          if (/Discoverable:\s*yes/i.test(details.stdout)) score += 1;
+          if (/Pairable:\s*yes/i.test(details.stdout)) score += 1;
+          if (/Discovering:\s*yes/i.test(details.stdout)) score += 1;
+        }
+        if (score > maxScore) {
+          maxScore = score;
+          bestMac = adapter.mac;
+        }
+      }
+      this.selectedAdapter = bestMac;
+      return this.selectedAdapter;
+    } catch (error) {
+      return "00:00:00:00:00:00";
+    }
   }
 
   private async privileged(args: string[], timeoutMs = 15_000): Promise<void> {
@@ -108,6 +188,9 @@ export class Bluez {
     if (!(["bredr", "le", "on"] as string[]).includes(mode)) throw new Error(`Invalid scan mode: ${mode}`);
     if (this.dryRun) return this.devices();
     if (options.signal?.aborted) return [];
+    if (!this.selectedAdapter) {
+      await this.resolveAdapter().catch(() => {});
+    }
     const duration = Math.max(1, seconds);
     const session = Bun.spawn(["bluetoothctl"], {
       stdin: "pipe", stdout: "pipe", stderr: "pipe", env: Bun.env,
@@ -130,7 +213,8 @@ export class Bluez {
     try {
       const stdin = session.stdin;
       if (!stdin) throw new Error("Could not open bluetoothctl scan session");
-      stdin.write(`scan off\nscan ${mode}\n`);
+      const selectCmd = this.selectedAdapter ? `select ${this.selectedAdapter}\n` : "";
+      stdin.write(`${selectCmd}scan off\nscan ${mode}\n`);
       const deadline = Date.now() + duration * 1_000;
       while (Date.now() < deadline && !options.signal?.aborted) await Bun.sleep(Math.min(100, deadline - Date.now()));
       if (!options.signal?.aborted) {
@@ -162,8 +246,31 @@ export class Bluez {
 
   async stopScan(timeoutMs = 8_000): Promise<void> { if (!this.dryRun) await this.bt(["scan", "off"], timeoutMs); }
 
+  async isRfkillBlocked(): Promise<boolean> {
+    if (!await commandExists("rfkill")) return false;
+    const result = await run(["rfkill", "list", "bluetooth"], { allowFailure: true, timeoutMs: 5_000 });
+    return /Soft blocked:\s*yes|Hard blocked:\s*yes/i.test(result.stdout);
+  }
+
+  async unblockRfkill(): Promise<void> {
+    if (!await commandExists("rfkill")) return;
+    await this.privileged(["rfkill", "unblock", "bluetooth"]).catch(error => {
+      log("rfkill.unblock.failed", { error: String(error) });
+    });
+  }
+
+  async unblock(mac: string): Promise<void> {
+    if (this.dryRun) return;
+    const result = await this.bt(["unblock", normalizeMac(mac)]);
+    if (result.exitCode !== 0) throw new Error(result.stderr || result.stdout || "Unblock failed");
+  }
+
   async prepare(): Promise<void> {
     if (this.dryRun) return;
+    if (await this.isRfkillBlocked()) {
+      log("rfkill.unblock.start", {});
+      await this.unblockRfkill();
+    }
     for (const args of [["power", "on"], ["pairable", "on"], ["scan", "off"]]) await this.bt(args);
   }
 
@@ -220,7 +327,8 @@ export class Bluez {
   }
 
   async adapterMac(): Promise<string> {
-    const result = await this.bt(["list"]);
+    if (this.selectedAdapter) return this.selectedAdapter;
+    const result = await this.bt(["list"], 8_000, undefined, true);
     const mac = result.stdout.match(/^Controller\s+([0-9A-F:]{17})/mi)?.[1];
     if (!mac) throw new Error("No Bluetooth controller found");
     return normalizeMac(mac);
@@ -243,7 +351,11 @@ export class Bluez {
 
   async diagnostics(): Promise<Record<string, string>> {
     const output: Record<string, string> = {};
-    for (const [name, argv] of Object.entries({ controllers: ["bluetoothctl", "list"], controller: ["bluetoothctl", "show"], rfkill: ["rfkill", "list", "bluetooth"], audio: ["wpctl", "status"] })) {
+    if (!this.selectedAdapter) {
+      await this.resolveAdapter().catch(() => {});
+    }
+    const controllerCmd = this.selectedAdapter ? ["bluetoothctl", "show", this.selectedAdapter] : ["bluetoothctl", "show"];
+    for (const [name, argv] of Object.entries({ controllers: ["bluetoothctl", "list"], controller: controllerCmd, rfkill: ["rfkill", "list", "bluetooth"], audio: ["wpctl", "status"] })) {
       if (await commandExists(argv[0]!)) {
         const result = await run(argv, { allowFailure: true, timeoutMs: 10_000 });
         output[name] = `${result.stdout}${result.stderr}`.trim();

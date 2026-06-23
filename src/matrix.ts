@@ -43,6 +43,11 @@ export class Recovery {
 
   private async connect(mac: string): Promise<DeviceState> {
     let state = await this.bluez.info(mac);
+    if (state.blocked) {
+      log("device.unblock", { mac });
+      await this.bluez.unblock(mac).catch(error => log("unblock.failed", { error: String(error) }));
+      state = await this.bluez.info(mac);
+    }
     if (!state.trusted) await this.bluez.trust(mac);
     if (!state.connected) {
       await this.bluez.connect(mac, undefined, this.options.connectTimeoutMs)

@@ -29,9 +29,9 @@ Bluetooth controller, kernel, BlueZ, PipeWire, WirePlumber and session policy.
 | Physically verified path | Tribit A2DP speaker on one Linux host/controller |
 | Failure modes catalogued | 108 |
 | Full observe/guidance/verify playbooks | 108/108 |
-| Implemented automatically | 18/108 |
-| Partially detected or mitigated | 26/108 |
-| Guidance/architecture only | 61 planned, 3 manual/proprietary |
+| Implemented automatically | 20/108 |
+| Partially detected or mitigated | 25/108 |
+| Guidance/architecture only | 60 planned, 3 manual/proprietary |
 | End-to-end recovery focus | Classic pairing/bonding, adapter power, A2DP output |
 
 `108/108` means every catalogued failure has a stable ID and a safe provisional

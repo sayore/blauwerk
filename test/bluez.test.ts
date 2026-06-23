@@ -42,4 +42,82 @@ describe("BlueZ state parsing", () => {
       mac: "AC:B1:EE:71:A1:51",
     });
   });
+
+  test("parses device properties: Alias, Icon, Class, and AddressType", () => {
+    const raw = "Device AA:BB:CC:DD:EE:FF (public)\n Alias: My Speaker\n Icon: audio-card\n Class: 0x240404\n Paired: yes\n Connected: yes";
+    const state = parseDeviceInfo(raw);
+    expect(state.mac).toBe("AA:BB:CC:DD:EE:FF");
+    expect(state.addressType).toBe("public");
+    expect(state.alias).toBe("My Speaker");
+    expect(state.icon).toBe("audio-card");
+    expect(state.class).toBe("0x240404");
+  });
+
+  test("parses device properties with trailing and leading spaces", () => {
+    const raw = "Device AA:BB:CC:DD:EE:FF\n\tAlias:   My Speaker   \n\tIcon:   audio-card   ";
+    const state = parseDeviceInfo(raw);
+    expect(state.alias).toBe("My Speaker");
+    expect(state.icon).toBe("audio-card");
+  });
+
+  test("handles empty/missing properties by returning undefined", () => {
+    const state = parseDeviceInfo("Device AA:BB:CC:DD:EE:FF\n Paired: no");
+    expect(state.alias).toBeUndefined();
+    expect(state.icon).toBeUndefined();
+    expect(state.class).toBeUndefined();
+  });
+
+  test("parses battery percentage with different hexadecimal patterns", () => {
+    expect(parseDeviceInfo("Battery Percentage: 0x5a (90)").battery).toBe(90);
+    expect(parseDeviceInfo("Battery Percentage: 90").battery).toBe(90);
+  });
+
+  test("handles missing battery percentage by returning undefined", () => {
+    expect(parseDeviceInfo("Device AA:BB:CC:DD:EE:FF\n Paired: yes").battery).toBeUndefined();
+  });
+
+  test("parses discovery lines with invalid properties and ignores them", () => {
+    expect(parseDiscoveryLine("[CHG] Device AC:B1:EE:71:A1:51 TxPower: 12")).toEqual({
+      mac: "AC:B1:EE:71:A1:51",
+    });
+  });
+
+  test("parses discovery lines with new devices having no name", () => {
+    expect(parseDiscoveryLine("[NEW] Device AC:B1:EE:71:A1:51")).toEqual({
+      mac: "AC:B1:EE:71:A1:51",
+    });
+  });
+
+  test("returns undefined for completely malformed discovery lines", () => {
+    expect(parseDiscoveryLine("random text")).toBeUndefined();
+    expect(parseDiscoveryLine("[NEW] completely broken")).toBeUndefined();
+  });
+
+  test("normalizes lowercase MAC addresses successfully", () => {
+    expect(normalizeMac("aa:bb:cc:dd:ee:ff")).toBe("AA:BB:CC:DD:EE:FF");
+  });
+
+  test("rejects MAC addresses that contain invalid hexadecimal characters", () => {
+    expect(() => normalizeMac("AA:BB:CC:DD:EE:GG")).toThrow();
+  });
+
+  test("rejects MAC addresses that are too short", () => {
+    expect(() => normalizeMac("AA:BB:CC")).toThrow();
+  });
+
+  test("rejects MAC addresses that are too long", () => {
+    expect(() => normalizeMac("AA:BB:CC:DD:EE:FF:GG")).toThrow();
+  });
+
+  test("parses multiple services and extracts them into UUIDs array", () => {
+    const raw = "Device AA:BB:CC:DD:EE:FF\n UUID: Audio Sink\n UUID: AVRCP Target";
+    const state = parseDeviceInfo(raw);
+    expect(state.uuids).toEqual(["Audio Sink", "AVRCP Target"]);
+  });
+
+  test("handles legacyPairing property correctly", () => {
+    expect(parseDeviceInfo("LegacyPairing: yes").legacyPairing).toBeTrue();
+    expect(parseDeviceInfo("LegacyPairing: no").legacyPairing).toBeFalse();
+    expect(parseDeviceInfo("").legacyPairing).toBeUndefined();
+  });
 });

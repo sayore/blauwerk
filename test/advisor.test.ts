@@ -56,4 +56,74 @@ describe("device advisor", () => {
     const notices = adviseDevice(device({ connected: false, paired: true, uuids: ["00001124-0000-1000-8000-00805f9b34fb"] })); // HID profile
     expect(notices.map(notice => notice.id)).toContain("gamepad-idle-sleep");
   });
+
+  test("triggers blocked error notice", () => {
+    const notices = adviseDevice(device({ blocked: true }));
+    expect(notices.map(n => n.id)).toContain("blocked");
+  });
+
+  test("triggers not-bonded warning notice", () => {
+    const notices = adviseDevice(device({ paired: true, bonded: false }));
+    expect(notices.map(n => n.id)).toContain("not-bonded");
+  });
+
+  test("triggers not-trusted warning notice", () => {
+    const notices = adviseDevice(device({ paired: true, trusted: false }));
+    expect(notices.map(n => n.id)).toContain("not-trusted");
+  });
+
+  test("triggers services-missing warning notice", () => {
+    const notices = adviseDevice(device({ connected: true, uuids: [] }));
+    expect(notices.map(n => n.id)).toContain("services-missing");
+  });
+
+  test("triggers private-address info notice", () => {
+    const notices = adviseDevice(device({ addressType: "random", paired: false }));
+    expect(notices.map(n => n.id)).toContain("private-address");
+  });
+
+  test("triggers weak-signal warning notice", () => {
+    const notices = adviseDevice(device({ rssi: -82 }));
+    expect(notices.map(n => n.id)).toContain("weak-signal");
+  });
+
+  test("triggers legacy-pairing info notice", () => {
+    const notices = adviseDevice(device({ legacyPairing: true }));
+    expect(notices.map(n => n.id)).toContain("legacy-pairing");
+  });
+
+  test("triggers missing audio card warning notice", () => {
+    const notices = adviseDevice(
+      device({ connected: true, uuids: ["0000110b-0000-1000-8000-00805f9b34fb"] }), // Sink
+      { audio: { serverAvailable: true, cardFound: false, sinkFound: false, availableProfiles: [] } }
+    );
+    expect(notices.map(n => n.id)).toContain("audio-card-missing");
+  });
+
+  test("triggers missing audio sink warning notice", () => {
+    const notices = adviseDevice(
+      device({ connected: true, uuids: ["0000110b-0000-1000-8000-00805f9b34fb"] }),
+      { audio: { serverAvailable: true, cardFound: true, sinkFound: false, availableProfiles: [] } }
+    );
+    expect(notices.map(n => n.id)).toContain("audio-sink-missing");
+  });
+
+  test("triggers adapter-autosuspend warning notice", () => {
+    const notices = adviseDevice(device(), {
+      power: { path: "/sys/class", control: "auto", autosuspendDelayMs: 2_000 }
+    });
+    expect(notices.map(n => n.id)).toContain("adapter-autosuspend");
+  });
+
+  test("triggers config issues warnings and errors", () => {
+    const notices = adviseDevice(device(), {
+      configIssues: [{ section: "General", key: "IdleTimeout", value: "0", severity: "error", message: "invalid" }]
+    });
+    expect(notices.map(n => n.id)).toContain("config-General-IdleTimeout");
+  });
+
+  test("triggers unknown-capabilities info notice", () => {
+    const notices = adviseDevice(device({ connected: true, uuids: [] }));
+    expect(notices.map(n => n.id)).toContain("unknown-capabilities");
+  });
 });

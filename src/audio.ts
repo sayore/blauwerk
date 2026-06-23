@@ -43,7 +43,7 @@ export class AudioManager {
     };
   }
 
-  private async wait(mac: string, seconds: number): Promise<AudioState> {
+  protected async wait(mac: string, seconds: number): Promise<AudioState> {
     const deadline = Date.now() + seconds * 1_000;
     let state = await this.state(mac);
     while (!state.sinkFound && Date.now() < deadline) {
@@ -105,7 +105,7 @@ export class AudioManager {
     }
   }
 
-  private async waitBluetooth(bluez: Bluez, mac: string, connected: boolean, seconds: number): Promise<boolean> {
+  protected async waitBluetooth(bluez: Bluez, mac: string, connected: boolean, seconds: number): Promise<boolean> {
     const deadline = Date.now() + seconds * 1_000;
     do {
       if ((await bluez.info(mac)).connected === connected) return true;

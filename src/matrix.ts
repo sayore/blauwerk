@@ -71,13 +71,14 @@ export class Recovery {
             message: "Device was seen advertising in preflight scan but refused to connect (page timeout). This signature typically indicates that the device is already connected to another host (like a phone). Disconnect it from other hosts and try again."
           });
         }
+      } else {
+        const deadline = Date.now() + 10_000;
+        do {
+          state = await this.bluez.info(mac);
+          if (state.connected) break;
+          await Bun.sleep(1_000);
+        } while (Date.now() < deadline);
       }
-      const deadline = Date.now() + 10_000;
-      do {
-        state = await this.bluez.info(mac);
-        if (state.connected) break;
-        await Bun.sleep(1_000);
-      } while (Date.now() < deadline);
     }
     return state;
   }

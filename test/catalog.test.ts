@@ -58,4 +58,28 @@ describe("capability abstraction", () => {
     expect(selectBearerForIntent({} as any, "sensor")).toBe("le");
     expect(selectBearerForIntent({} as any, "file-transfer")).toBe("any");
   });
+
+  describe("profile registry conformity", () => {
+    const keys = [
+      "1101", "1103", "1105", "1106", "1108", "110a", "110b", "110c",
+      "110d", "110e", "1112", "1115", "1116", "1117", "111e", "111f",
+      "1124", "112e", "112f", "1132", "1133", "1134", "1200", "1800",
+      "1801", "180f", "1812", "184e", "184f", "1850", "1851", "1853",
+      "1854", "1855", "1856", "03b80e5a-ede8-4b33-a751-6ce34ec4c700"
+    ];
+
+    for (const key of keys) {
+      test(`verifies capability mapping for UUID suffix/hash ${key}`, () => {
+        const fullUuid = key.length === 4 ? `0000${key}-0000-1000-8000-00805f9b34fb` : key;
+        const device: DeviceState = {
+          mac: "AA:BB:CC:DD:EE:FF", available: true, paired: false, trusted: false,
+          blocked: false, connected: false, uuids: [fullUuid], raw: "",
+        };
+        const caps = capabilities(device);
+        expect(caps.profiles.length).toBe(1);
+        expect(caps.profiles[0]?.uuid).toBe(key);
+        expect(caps.recognition.recognized).toBe(1);
+      });
+    }
+  });
 });

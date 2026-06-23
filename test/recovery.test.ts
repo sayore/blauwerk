@@ -1,7 +1,16 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test, mock, beforeAll, afterAll } from "bun:test";
 import type { Bluez } from "../src/bluez";
 import { Recovery, safeMatrix } from "../src/matrix";
-import type { DeviceState } from "../src/types";
+import type { DeviceState, Attempt } from "../src/types";
+
+// Override Bun.sleep globally for this test file to prevent timeouts and run instantly
+const originalSleep = Bun.sleep;
+beforeAll(() => {
+  globalThis.Bun.sleep = async () => {};
+});
+afterAll(() => {
+  globalThis.Bun.sleep = originalSleep;
+});
 
 const state = (overrides: Partial<DeviceState> = {}): DeviceState => ({
   mac: "AC:B1:EE:71:A1:51", available: true, paired: true, bonded: true, trusted: true,
@@ -132,5 +141,329 @@ describe("convergent recovery", () => {
     expect(disconnects).toBe(1);
     expect(connects).toBe(1);
     expect(removes).toBe(0);
+  });
+
+  test("unblocks device if blocked during connect", async () => {
+    let unblocked = false;
+    let current = state({ paired: true, connected: false, blocked: true });
+    const fake = {
+      prepare: async () => {}, info: async () => current,
+      unblock: async () => { unblocked = true; current.blocked = false; },
+      trust: async () => {},
+      connect: async () => { current.connected = true; },
+    } as unknown as Bluez;
+    const recovery = new Recovery(fake, { scanSeconds: 1, pairTimeoutMs: 1, connectTimeoutMs: 1 });
+    const res = await (recovery as any).connect(current.mac);
+    expect(unblocked).toBeTrue();
+    expect(res.connected).toBeTrue();
+  });
+
+  test("trusts device if untrusted during connect", async () => {
+    let trusted = false;
+    let current = state({ paired: true, connected: false, trusted: false });
+    const fake = {
+      prepare: async () => {}, info: async () => current,
+      trust: async () => { trusted = true; current.trusted = true; },
+      connect: async () => { current.connected = true; },
+    } as unknown as Bluez;
+    const recovery = new Recovery(fake, { scanSeconds: 1, pairTimeoutMs: 1, connectTimeoutMs: 1 });
+    const res = await (recovery as any).connect(current.mac);
+    expect(trusted).toBeTrue();
+    expect(res.connected).toBeTrue();
+  });
+
+  test("removes host-side bond on CTKD mismatch error during connect", async () => {
+    let disconnected = false;
+    let removed = false;
+    let current = state({ paired: true, connected: false });
+    const fake = {
+      prepare: async () => {}, info: async () => current,
+      trust: async () => {},
+      connect: async () => {
+        throw new Error("Authentication Failed");
+      },
+      disconnect: async () => { disconnected = true; },
+      remove: async () => { removed = true; current.paired = false; current.bonded = false; },
+    } as unknown as Bluez;
+    const recovery = new Recovery(fake, { scanSeconds: 1, pairTimeoutMs: 1, connectTimeoutMs: 1 });
+    const res = await (recovery as any).connect(current.mac);
+    expect(disconnected).toBeTrue();
+    expect(removed).toBeTrue();
+    expect(res.paired).toBeFalse();
+  });
+
+  test("does not remove host-side bond on random connect error", async () => {
+    let disconnected = false;
+    let removed = false;
+    let current = state({ paired: true, connected: false });
+    const fake = {
+      prepare: async () => {}, info: async () => current,
+      trust: async () => {},
+      connect: async () => {
+        throw new Error("Random error");
+      },
+      disconnect: async () => { disconnected = true; },
+      remove: async () => { removed = true; },
+    } as unknown as Bluez;
+    const recovery = new Recovery(fake, { scanSeconds: 1, pairTimeoutMs: 1, connectTimeoutMs: 1 });
+    const res = await (recovery as any).connect(current.mac);
+    expect(disconnected).toBeFalse();
+    expect(removed).toBeFalse();
+  });
+
+  test("stops with multipoint-conflict if target seen in preflight and fails connection with page timeout", async () => {
+    let current = state({ paired: true, connected: false });
+    const fake = {
+      prepare: async () => {}, info: async () => current,
+      trust: async () => {},
+      connect: async () => {
+        throw new Error("Host is down");
+      },
+    } as unknown as Bluez;
+    const recovery = new Recovery(fake, { scanSeconds: 1, pairTimeoutMs: 1, connectTimeoutMs: 1 });
+    (recovery as any).targetSeenInPreflight = true;
+    const res = await (recovery as any).connect(current.mac);
+    expect(res.connected).toBeFalse();
+  });
+
+  test("settleBond waits and returns early if device becomes healthy and services are resolved", async () => {
+    let infoCalls = 0;
+    let current = state({ bonded: true, servicesResolved: false, uuids: [] });
+    const fake = {
+      info: async () => {
+        infoCalls++;
+        if (infoCalls >= 2) {
+          current.servicesResolved = true;
+        }
+        return current;
+      }
+    } as unknown as Bluez;
+    const recovery = new Recovery(fake, { scanSeconds: 1, pairTimeoutMs: 1, connectTimeoutMs: 1, bondWaitMs: 5000 });
+    const res = await (recovery as any).settleBond(current.mac, current);
+    expect(infoCalls).toBe(2);
+    expect(res.servicesResolved).toBeTrue();
+  });
+
+  test("settleBond returns early if device is no longer usable", async () => {
+    let infoCalls = 0;
+    let current = state({ bonded: true, servicesResolved: false, uuids: [] });
+    const fake = {
+      info: async () => {
+        infoCalls++;
+        return state({ paired: false });
+      }
+    } as unknown as Bluez;
+    const recovery = new Recovery(fake, { scanSeconds: 1, pairTimeoutMs: 1, connectTimeoutMs: 1, bondWaitMs: 5000 });
+    const res = await (recovery as any).settleBond(current.mac, current);
+    expect(infoCalls).toBe(1);
+    expect(res.paired).toBeFalse();
+  });
+
+  test("restart action is executed once when attempt.reset is restart", async () => {
+    let restarts = 0;
+    let current = state({ paired: false, connected: false });
+    const fake = {
+      prepare: async () => {}, info: async () => current,
+      restartBluetooth: async () => { restarts++; },
+      scanLive: async (_mode: string, _seconds: number, options: any) => {
+        options?.onSeen?.(current.mac);
+        return [current];
+      },
+      cancelPairing: async () => {},
+      pair: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+      connect: async () => { current.connected = true; },
+    } as unknown as Bluez;
+    const recovery = new Recovery(fake, { scanSeconds: 1, pairTimeoutMs: 1, connectTimeoutMs: 1 });
+    const matrix: Attempt[] = [{ agent: "NoInputNoOutput", scan: "bredr", reset: "restart" }];
+    await recovery.run(current.mac, matrix);
+    expect(restarts).toBe(1);
+  });
+
+  test("purge action is executed once when attempt.reset is purge", async () => {
+    let purges = 0;
+    let current = state({ paired: false, connected: false });
+    const fake = {
+      prepare: async () => {}, info: async () => current,
+      purge: async () => { purges++; },
+      scanLive: async (_mode: string, _seconds: number, options: any) => {
+        options?.onSeen?.(current.mac);
+        return [current];
+      },
+      cancelPairing: async () => {},
+      pair: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+      connect: async () => { current.connected = true; },
+    } as unknown as Bluez;
+    const recovery = new Recovery(fake, { scanSeconds: 1, pairTimeoutMs: 1, connectTimeoutMs: 1 });
+    const matrix: Attempt[] = [{ agent: "NoInputNoOutput", scan: "bredr", reset: "purge" }];
+    await recovery.run(current.mac, matrix);
+    expect(purges).toBe(1);
+  });
+
+  test("powercycle action is executed once when attempt.reset is powercycle", async () => {
+    let powercycles = 0;
+    let current = state({ paired: false, connected: false });
+    const fake = {
+      prepare: async () => {}, info: async () => current,
+      powercycle: async () => { powercycles++; },
+      scanLive: async (_mode: string, _seconds: number, options: any) => {
+        options?.onSeen?.(current.mac);
+        return [current];
+      },
+      cancelPairing: async () => {},
+      pair: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+      connect: async () => { current.connected = true; },
+    } as unknown as Bluez;
+    const recovery = new Recovery(fake, { scanSeconds: 1, pairTimeoutMs: 1, connectTimeoutMs: 1 });
+    const matrix: Attempt[] = [{ agent: "NoInputNoOutput", scan: "bredr", reset: "powercycle" }];
+    await recovery.run(current.mac, matrix);
+    expect(powercycles).toBe(1);
+  });
+
+  test("legacy pin code is selected and attempted during legacy pairing", async () => {
+    let attemptedPin: string | undefined;
+    let current = state({ paired: false, connected: false, legacyPairing: true });
+    const fake = {
+      prepare: async () => {}, info: async () => current,
+      scanLive: async (_mode: string, _seconds: number, options: any) => {
+        options?.onSeen?.(current.mac);
+        return [current];
+      },
+      cancelPairing: async () => {},
+      pair: async (mac: string, agent: string, timeout: number, pin?: string) => {
+        attemptedPin = pin;
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+      connect: async () => { current.connected = true; },
+    } as unknown as Bluez;
+    const recovery = new Recovery(fake, { scanSeconds: 1, pairTimeoutMs: 1, connectTimeoutMs: 1 });
+    const matrix: Attempt[] = [{ agent: "NoInputNoOutput", scan: "bredr", reset: "none" }];
+    await recovery.run(current.mac, matrix);
+    expect(attemptedPin).toBe("0000");
+  });
+
+  test("stops with authentication-rejected when pair throws org.bluez.Error.AuthenticationFailed", async () => {
+    let current = state({ paired: false, connected: false });
+    const fake = {
+      prepare: async () => {}, info: async () => current,
+      scanLive: async (_mode: string, _seconds: number, options: any) => {
+        options?.onSeen?.(current.mac);
+        return [current];
+      },
+      cancelPairing: async () => {},
+      disconnect: async () => {},
+      pair: async () => {
+        throw new Error("org.bluez.Error.AuthenticationFailed");
+      },
+    } as unknown as Bluez;
+    const recovery = new Recovery(fake, { scanSeconds: 1, pairTimeoutMs: 1, connectTimeoutMs: 1 });
+    const matrix: Attempt[] = [{ agent: "NoInputNoOutput", scan: "bredr", reset: "none" }];
+    const res = await recovery.run(current.mac, matrix);
+    expect(res.paired).toBeFalse();
+  });
+
+  test("stops with pair-lost if pairing succeeds but is immediately dropped", async () => {
+    let current = state({ paired: false, connected: false });
+    const fake = {
+      prepare: async () => {}, info: async () => current,
+      scanLive: async (_mode: string, _seconds: number, options: any) => {
+        options?.onSeen?.(current.mac);
+        return [current];
+      },
+      cancelPairing: async () => {},
+      pair: async () => {
+        return { exitCode: 0, stdout: "Pairing success", stderr: "" };
+      },
+      connect: async () => { current.connected = true; },
+    } as unknown as Bluez;
+    const recovery = new Recovery(fake, { scanSeconds: 1, pairTimeoutMs: 1, connectTimeoutMs: 1 });
+    const matrix: Attempt[] = [{ agent: "NoInputNoOutput", scan: "bredr", reset: "none" }];
+    const res = await recovery.run(current.mac, matrix);
+    expect(res.paired).toBeFalse();
+  });
+
+  test("stops with target-not-advertising if scan is on and target is not seen", async () => {
+    let current = state({ paired: false, connected: false });
+    const fake = {
+      prepare: async () => {}, info: async () => current,
+      scanLive: async () => [],
+    } as unknown as Bluez;
+    const recovery = new Recovery(fake, { scanSeconds: 1, pairTimeoutMs: 1, connectTimeoutMs: 1 });
+    const matrix: Attempt[] = [{ agent: "NoInputNoOutput", scan: "on", reset: "none" }];
+    const res = await recovery.run(current.mac, matrix);
+    expect(res.paired).toBeFalse();
+  });
+
+  test("retries next attempt if target not seen in non-on scan", async () => {
+    let scans = 0;
+    let current = state({ paired: false, connected: false });
+    const fake = {
+      prepare: async () => {}, info: async () => current,
+      scanLive: async (_mode: string, _seconds: number, options: any) => {
+        scans++;
+        if (scans === 1) return [];
+        options?.onSeen?.(current.mac);
+        return [current];
+      },
+      cancelPairing: async () => {},
+      pair: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+      connect: async () => { current.connected = true; },
+    } as unknown as Bluez;
+    const recovery = new Recovery(fake, { scanSeconds: 1, pairTimeoutMs: 1, connectTimeoutMs: 1 });
+    const matrix: Attempt[] = [
+      { agent: "NoInputNoOutput", scan: "bredr", reset: "none" },
+      { agent: "NoInputNoOutput", scan: "bredr", reset: "none" }
+    ];
+    await recovery.run(current.mac, matrix);
+    expect(scans).toBe(2);
+  });
+
+  test("reconciles pairing if pairing command fails but BlueZ reports Paired: yes", async () => {
+    let reconciled = false;
+    let current = state({ paired: false, connected: false });
+    const fake = {
+      prepare: async () => {},
+      info: async () => {
+        if (reconciled) return state({ paired: true, connected: current.connected });
+        return current;
+      },
+      scanLive: async (_mode: string, _seconds: number, options: any) => {
+        options?.onSeen?.(current.mac);
+        return [current];
+      },
+      cancelPairing: async () => {},
+      pair: async () => {
+        reconciled = true;
+        throw new Error("Command failed");
+      },
+      connect: async () => { current.connected = true; },
+    } as unknown as Bluez;
+    const recovery = new Recovery(fake, { scanSeconds: 1, pairTimeoutMs: 1, connectTimeoutMs: 1 });
+    const matrix: Attempt[] = [{ agent: "NoInputNoOutput", scan: "bredr", reset: "none" }];
+    const res = await recovery.run(current.mac, matrix);
+    expect(res.paired).toBeTrue();
+    expect(res.connected).toBeTrue();
+  });
+
+  test("cancels pairing and disconnects if pairing throws an error and device is not paired", async () => {
+    let cancelled = false;
+    let disconnected = false;
+    let current = state({ paired: false, connected: false });
+    const fake = {
+      prepare: async () => {}, info: async () => current,
+      scanLive: async (_mode: string, _seconds: number, options: any) => {
+        options?.onSeen?.(current.mac);
+        return [current];
+      },
+      cancelPairing: async () => { cancelled = true; },
+      pair: async () => {
+        throw new Error("Failed pairing");
+      },
+      disconnect: async () => { disconnected = true; },
+    } as unknown as Bluez;
+    const recovery = new Recovery(fake, { scanSeconds: 1, pairTimeoutMs: 1, connectTimeoutMs: 1 });
+    const matrix: Attempt[] = [{ agent: "NoInputNoOutput", scan: "bredr", reset: "none" }];
+    await recovery.run(current.mac, matrix);
+    expect(cancelled).toBeTrue();
+    expect(disconnected).toBeTrue();
   });
 });

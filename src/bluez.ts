@@ -41,10 +41,11 @@ export interface DiscoveryEvent {
 }
 
 export function parseDiscoveryLine(line: string): DiscoveryEvent | undefined {
-  const added = line.match(/^\s*\[(?:NEW|CHG)\]\s+Device\s+([0-9A-F:]{17})\s+(.+?)\s*$/i);
+  const added = line.match(/^\s*\[(?:NEW|CHG)\]\s+Device\s+([0-9A-F:]{17})(?:\s+(.+?))?\s*$/i);
   if (!added) return undefined;
   const mac = normalizeMac(added[1]!);
-  const detail = added[2]!.trim();
+  const detail = added[2]?.trim();
+  if (!detail) return { mac };
   const property = detail.match(/^(?:Name|Alias):\s*(.+)$/i)?.[1]?.trim();
   if (/^[A-Za-z]+(?:\.[A-Za-z]+)*:\s*/.test(detail) && !property) return { mac };
   return { mac, name: property ?? detail };

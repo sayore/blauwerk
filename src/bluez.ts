@@ -124,9 +124,38 @@ export class Bluez {
 
     if (!skipSelect && this.selectedAdapter && args[0] !== "list" && !(args[0] === "show" && args.length > 1)) {
       const commandStr = args.map(a => a.includes(" ") ? `"${a}"` : a).join(" ");
-      const input = interactive ? `select ${this.selectedAdapter}\n${commandStr}\n` : `select ${this.selectedAdapter}\n${commandStr}\nquit\n`;
+      
+      let input = interactive ? `select ${this.selectedAdapter}\n${commandStr}\n` : `select ${this.selectedAdapter}\n${commandStr}\nquit\n`;
+      let keepStdinOpen = false;
+      let wrappedOnStdout = onStdout;
+      
+      const isConnect = args[0] === "connect";
+      const isPair = args[0] === "pair";
+      
+      if (!interactive && (isConnect || isPair)) {
+        input = `select ${this.selectedAdapter}\n${commandStr}\n`;
+        keepStdinOpen = true;
+        let accumulated = "";
+        let quitWritten = false;
+        wrappedOnStdout = (text, writeStdin) => {
+          accumulated += text;
+          if (onStdout) {
+            try { onStdout(text, writeStdin); } catch {}
+          }
+          if (!quitWritten) {
+            const hasFinished = isConnect
+              ? /Connection successful|Failed to connect|Connection failed|ProfileUnavailable|org\.bluez\.Error|ServicesResolved:\s*yes/i.test(accumulated)
+              : /Pairing successful|Failed to pair|AuthenticationFailed|org\.bluez\.Error/i.test(accumulated);
+            if (hasFinished) {
+              quitWritten = true;
+              writeStdin("quit\n");
+            }
+          }
+        };
+      }
+      
       const argv = ["bluetoothctl", "--timeout", String(Math.max(1, Math.ceil(timeoutMs / 1_000))), ...(agent ? ["--agent", agent] : [])];
-      const result = await run(argv, { timeoutMs: timeoutMs + 2_000, allowFailure: true, input, interactive, onStdout });
+      const result = await run(argv, { timeoutMs: timeoutMs + 2_000, allowFailure: true, input, interactive, keepStdinOpen, onStdout: wrappedOnStdout });
       if (result.exitCode === 0) {
         const combined = `${result.stdout}\n${result.stderr}`;
         if (

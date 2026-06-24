@@ -12,6 +12,7 @@ export async function run(argv: string[], options: {
   allowFailure?: boolean;
   env?: Record<string, string>;
   interactive?: boolean;
+  keepStdinOpen?: boolean;
   onStdout?: (text: string, writeStdin: (chunk: string) => void) => void;
 } = {}): Promise<RunResult> {
   const timeoutMs = options.timeoutMs ?? 30_000;
@@ -41,7 +42,9 @@ export async function run(argv: string[], options: {
     };
     globalThis.process.stdin.on("data", onData);
   } else if (options.input !== undefined && child.stdin) {
-    child.stdin.end();
+    if (!options.keepStdinOpen) {
+      child.stdin.end();
+    }
   }
 
   let stdoutText = "";

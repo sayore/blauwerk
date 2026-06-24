@@ -159,6 +159,14 @@ export class AudioManager {
 
     let connectError: string | undefined;
     log("audio.reconnect", { phase: "a2dp", uuid: A2DP_SINK_UUID });
+    
+    // Ensure the device is trusted to prevent BlueZ from rejecting the profile connection
+    bluetooth = await bluez.info(mac);
+    if (!bluetooth.trusted && typeof bluez.trust === "function") {
+      log("audio.trust", { mac });
+      await bluez.trust(mac).catch(error => log("trust.failed", { error: String(error) }));
+    }
+    
     await bluez.connect(mac, A2DP_SINK_UUID, 30_000).catch(error => {
       connectError = String(error);
       log("audio.a2dp-connect", { error: connectError });

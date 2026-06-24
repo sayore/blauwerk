@@ -51,12 +51,32 @@ export class Recovery {
     }
     if (!state.trusted) await this.bluez.trust(mac);
     if (!state.connected) {
+      const maxConnectAttempts = 3;
       let connectError: any = null;
-      await this.bluez.connect(mac, undefined, this.options.connectTimeoutMs)
-        .catch(error => {
-          connectError = error;
-          log("connect.failed", { profile: "default", error: String(error) });
-        });
+      
+      for (let attempt = 1; attempt <= maxConnectAttempts; attempt++) {
+        connectError = null;
+        if (attempt > 1) {
+          log("connect.retry", { mac, attempt, maxAttempts: maxConnectAttempts });
+          await Bun.sleep(2_000);
+        }
+        
+        await this.bluez.connect(mac, undefined, this.options.connectTimeoutMs)
+          .catch(error => {
+            connectError = error;
+            log("connect.failed", { profile: "default", attempt, error: String(error) });
+          });
+        
+        if (!connectError) {
+          break;
+        }
+        
+        const errMsg = String(connectError);
+        if (state.paired && /AuthenticationFailed|Key missing|Link key|Authentication Failed/i.test(errMsg)) {
+          break;
+        }
+      }
+      
       if (connectError) {
         const errMsg = String(connectError);
         if (state.paired && /AuthenticationFailed|Key missing|Link key|Authentication Failed/i.test(errMsg)) {
@@ -138,7 +158,20 @@ export class Recovery {
           await this.bluez.disconnect(mac).catch(error => log("disconnect.failed", { error: String(error) }));
           await Bun.sleep(500);
           await this.bluez.prepare();
-          preflight = await this.scanFor(mac, "bredr");
+          
+          const maxAttempts = 3;
+          const scanSecondsPerAttempt = this.options.scanSeconds > 0 ? this.options.scanSeconds : 10;
+          for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            console.log(`\n\x1b[1m\x1b[33m>>> ACTION REQUIRED: Put your device in PAIRING/BONDING mode now! <<<\x1b[0m`);
+            console.log(`\x1b[1m(For Keychron keyboards: hold Fn + 1 (or 2/3) for 3-5 seconds until the Bluetooth LED flashes rapidly)\x1b[0m`);
+            console.log(`Waiting ${scanSecondsPerAttempt} seconds for device to start advertising... (Attempt ${attempt} of ${maxAttempts})\n`);
+            
+            preflight = await this.scanFor(mac, "bredr", scanSecondsPerAttempt);
+            if (preflight.targetSeen) {
+              log("recovery.fast-path", { reason: "rebond-required", phase: "target-detected", attempt });
+              break;
+            }
+          }
         }
         if (!preflight.targetSeen) {
           if (this.options.allowSessionDrop) {
@@ -180,7 +213,22 @@ export class Recovery {
         if (attempt.reset === "purge") await this.once("purge", () => this.bluez.purge(mac));
         if (attempt.reset === "powercycle") await this.once("powercycle", () => this.bluez.powercycle());
         await this.bluez.prepare();
-        const { targetSeen } = await this.scanFor(mac, attempt.scan);
+        let scanResult = await this.scanFor(mac, attempt.scan);
+        if (!scanResult.targetSeen && this.options.requireBond) {
+          const maxAttempts = 3;
+          const scanSecondsPerAttempt = this.options.scanSeconds > 0 ? this.options.scanSeconds : 10;
+          for (let attemptNum = 1; attemptNum <= maxAttempts; attemptNum++) {
+            console.log(`\n\x1b[1m\x1b[33m>>> ACTION REQUIRED: Put your device in PAIRING/BONDING mode now! <<<\x1b[0m`);
+            console.log(`\x1b[1m(For Keychron keyboards: hold Fn + 1 (or 2/3) for 3-5 seconds until the Bluetooth LED flashes rapidly)\x1b[0m`);
+            console.log(`Waiting ${scanSecondsPerAttempt} seconds for device to start advertising... (Attempt ${attemptNum} of ${maxAttempts})\n`);
+            
+            scanResult = await this.scanFor(mac, attempt.scan, scanSecondsPerAttempt);
+            if (scanResult.targetSeen) {
+              break;
+            }
+          }
+        }
+        const targetSeen = scanResult.targetSeen;
         state = await this.bluez.info(mac);
         if (!targetSeen) {
           const message = `Target ${mac} was not seen during ${this.options.scanSeconds}s ${attempt.scan} scan`;

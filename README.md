@@ -40,7 +40,7 @@ Bluetooth controller, kernel, BlueZ, PipeWire, WirePlumber and session policy.
 
 | Scope | Current state |
 | --- | --- |
-| Physically verified path | Tribit A2DP speaker on one Linux host/controller |
+| Physically verified path | Tribit Home Speaker, Soundcore Boom 2 Pro, and Keychron K1 keyboard on one Linux host/controller |
 | Failure modes catalogued | 108 |
 | Full observe/guidance/verify playbooks | 108/108 |
 | Implemented automatically | 44/108 |

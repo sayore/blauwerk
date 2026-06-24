@@ -137,7 +137,7 @@ describe("convergent recovery", () => {
     const result = await recovery.run(current.mac, safeMatrix);
     expect(result.connected).toBeTrue();
     expect(result.bonded).toBeFalse();
-    expect(scans).toBe(2);
+    expect(scans).toBe(4);
     expect(disconnects).toBe(1);
     expect(connects).toBe(1);
     expect(removes).toBe(0);

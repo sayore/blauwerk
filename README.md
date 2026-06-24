@@ -31,6 +31,15 @@ Safety invariants:
 - cache purge and controller power cycling remain explicit `--aggressive` actions;
 - success is re-read from BlueZ and the intent-specific subsystem after every mutation.
 
+## Input & Media Safety Features
+
+Blauwerk implements specialized, automated safeguards for input (HID) and media (audio) devices to prevent lockouts and connection dropouts:
+
+- **Automatic Input Bonding (HID):** Human Interface Devices (keyboards, mice, gamepads) automatically default to requiring a persistent bond (`--require-bond`). This prevents unstable, ephemeral pairings that fail to auto-reconnect when the device wakes from sleep.
+- **Non-Blocking Retry Loop:** When a working input device must be temporarily disconnected to probe for bonding, Blauwerk runs a fully automatic, non-blocking 3-attempt scan loop. Since it requires no keyboard input, you are never locked out of your system while your keyboard is offline.
+- **Connection Rollback Retries:** If a device fails to advertise during a rebond attempt, the rollback mechanism automatically retries the connection up to 3 times (with a 2-second delay). This gives the device's radio ample time to wake up and boot, ensuring you are never left stranded in a disconnected state.
+- **Media Subsystem Verification:** Reconnecting an audio device automatically triggers downstream verification of PipeWire, WirePlumber, and PulseAudio sinks, restoring active playback streams and cycling cards if the audio server is unresponsive.
+
 ## Compatibility and support claims
 
 Blauwerk is currently beta software. It can inspect standards-based devices

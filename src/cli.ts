@@ -13,7 +13,7 @@ import { runSimulation } from "./simulate";
 import { DeviceRegistry } from "./registry";
 import { runDaemon, installDaemon, startDaemon, stopDaemon, getDaemonStatus } from "./daemon";
 
-const VERSION = "0.4.8";
+const VERSION = "0.4.9";
 const args = Bun.argv.slice(2);
 const command = args[0]?.startsWith("-") ? "dashboard" : (args.shift() ?? "dashboard");
 const flag = (name: string) => args.includes(name);

@@ -43,8 +43,13 @@ export interface DiscoveryEvent {
   icon?: string;
 }
 
+function stripAnsi(value: string): string {
+  return value.replace(/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, "");
+}
+
 export function parseDiscoveryLine(line: string): DiscoveryEvent | undefined {
-  const added = line.match(/^\s*\[(?:NEW|CHG)\]\s+Device\s+([0-9A-F:]{17})(?:\s+(.+?))?\s*$/i);
+  const clean = stripAnsi(line).replace(/\r/g, "").trim();
+  const added = clean.match(/\[(?:NEW|CHG)\]\s+Device\s+([0-9A-F:]{17})(?:\s+(.+?))?\s*$/i);
   if (!added) return undefined;
   const mac = normalizeMac(added[1]!);
   const detail = added[2]?.trim();
@@ -63,7 +68,7 @@ export function parseDiscoveryLine(line: string): DiscoveryEvent | undefined {
     }
   }
 
-  const classMatch = detail.match(/^Class:\s*(0x[0-9A-Fa-f]+|\d+)$/i);
+  const classMatch = detail.match(/^Class:\s*((?:0x[0-9A-Fa-f]+|\d+)(?:\s+\(\d+\))?)$/i);
   if (classMatch) {
     return { mac, class: classMatch[1]!.trim() };
   }
@@ -128,6 +133,7 @@ export class Bluez {
       let input = interactive ? `select ${this.selectedAdapter}\n${commandStr}\n` : `select ${this.selectedAdapter}\n${commandStr}\nquit\n`;
       let keepStdinOpen = false;
       let wrappedOnStdout = onStdout;
+      let cleanupOnExit: (() => void) | undefined;
       
       const isConnect = args[0] === "connect";
       const isPair = args[0] === "pair";
@@ -137,18 +143,69 @@ export class Bluez {
         keepStdinOpen = true;
         let accumulated = "";
         let quitWritten = false;
+        let pairSettleScheduled = false;
+        const timers: ReturnType<typeof setTimeout>[] = [];
+        const clearTimers = () => {
+          while (timers.length) {
+            const timer = timers.pop();
+            if (timer) clearTimeout(timer);
+          }
+        };
+        const writeSafe = (writeStdin: (chunk: string) => void, chunk: string) => {
+          try { writeStdin(chunk); } catch {}
+        };
+        const writeQuit = (writeStdin: (chunk: string) => void) => {
+          if (quitWritten) return;
+          quitWritten = true;
+          clearTimers();
+          writeSafe(writeStdin, "quit\n");
+        };
+        const schedulePairSettle = (writeStdin: (chunk: string) => void) => {
+          if (pairSettleScheduled) return;
+          pairSettleScheduled = true;
+          const mac = args[1];
+          const probe = () => {
+            if (!quitWritten && mac) writeSafe(writeStdin, `info ${mac}\n`);
+          };
+          for (const delay of [750, 2_000, 4_000, 7_000]) {
+            timers.push(setTimeout(probe, delay));
+          }
+          timers.push(setTimeout(() => writeQuit(writeStdin), 9_000));
+        };
+        cleanupOnExit = clearTimers;
         wrappedOnStdout = (text, writeStdin) => {
           accumulated += text;
           if (onStdout) {
             try { onStdout(text, writeStdin); } catch {}
           }
-          if (!quitWritten) {
-            const hasFinished = isConnect
-              ? /Connection successful|Failed to connect|Connection failed|ProfileUnavailable|org\.bluez\.Error|ServicesResolved:\s*yes/i.test(accumulated)
-              : /Pairing successful|Failed to pair|AuthenticationFailed|org\.bluez\.Error/i.test(accumulated);
-            if (hasFinished) {
-              quitWritten = true;
-              writeStdin("quit\n");
+          if (quitWritten) return;
+
+          if (isConnect) {
+            if (/Attempting to connect/i.test(accumulated) && !pairSettleScheduled) {
+              pairSettleScheduled = true;
+              const mac = args[1];
+              const probe = () => {
+                if (!quitWritten && mac) writeSafe(writeStdin, `info ${mac}\n`);
+              };
+              for (const delay of [2_000, 5_000, 9_000]) {
+                timers.push(setTimeout(probe, delay));
+              }
+              timers.push(setTimeout(() => writeQuit(writeStdin), 12_000));
+            }
+            const hasFinished = /Connection successful|Failed to connect|Connection failed|ProfileUnavailable|org\.bluez\.Error|Connected:\s*yes|ServicesResolved:\s*yes/i.test(accumulated);
+            if (hasFinished) writeQuit(writeStdin);
+            return;
+          }
+
+          if (/Failed to pair|AuthenticationFailed|org\.bluez\.Error/i.test(accumulated)) {
+            writeQuit(writeStdin);
+            return;
+          }
+
+          if (/Pairing successful/i.test(accumulated)) {
+            schedulePairSettle(writeStdin);
+            if (/Bonded:\s*yes|ServicesResolved:\s*yes/i.test(accumulated)) {
+              timers.push(setTimeout(() => writeQuit(writeStdin), 1_000));
             }
           }
         };
@@ -156,6 +213,7 @@ export class Bluez {
       
       const argv = ["bluetoothctl", "--timeout", String(Math.max(1, Math.ceil(timeoutMs / 1_000))), ...(agent ? ["--agent", agent] : [])];
       const result = await run(argv, { timeoutMs: timeoutMs + 2_000, allowFailure: true, input, interactive, keepStdinOpen, onStdout: wrappedOnStdout });
+      cleanupOnExit?.();
       if (result.exitCode === 0) {
         const combined = `${result.stdout}\n${result.stderr}`;
         if (
@@ -353,7 +411,21 @@ export class Bluez {
       // Avoid blocking an interactive selection on a second bluetoothctl process.
       if (!options.signal?.aborted) await this.stopScan(2_000);
     }
-    return options.signal?.aborted ? [...seen.values()] : this.devices();
+    const liveDevices = [...seen.values()];
+    if (options.signal?.aborted || !liveDevices.length) return liveDevices;
+
+    const cachedDevices = await this.devices().catch(() => []);
+    const cachedByMac = new Map(cachedDevices.map(device => [device.mac, device]));
+    return liveDevices.map(device => {
+      const cached = cachedByMac.get(device.mac);
+      if (!cached) return device;
+      return {
+        ...cached,
+        ...device,
+        name: device.name ?? cached.name,
+        alias: device.alias ?? cached.alias,
+      };
+    });
   }
 
   async scan(mode: ScanMode, seconds: number): Promise<DeviceState[]> {
@@ -401,6 +473,87 @@ export class Bluez {
     } : undefined;
     const result = await this.bt(["pair", normalizeMac(mac)], timeoutMs, agent, false, interactive, onStdout);
     if (result.exitCode !== 0) throw new Error(`${result.timedOut ? "Pairing timed out\n" : ""}${result.stderr || result.stdout || "Pairing failed"}`);
+    return result;
+  }
+
+  async pairAndConnect(mac: string, agent: Agent, timeoutMs: number, legacyPin?: string): Promise<RunResult> {
+    if (this.dryRun) return { argv: [], exitCode: 0, stdout: "dry-run", stderr: "", timedOut: false };
+    mac = normalizeMac(mac);
+    if (!this.selectedAdapter) {
+      await this.resolveAdapter().catch(() => {});
+    }
+
+    const argv = ["bluetoothctl", "--timeout", String(Math.max(1, Math.ceil(timeoutMs / 1_000))), "--agent", agent];
+    const selectCmd = this.selectedAdapter ? `select ${this.selectedAdapter}\n` : "";
+    const input = `${selectCmd}pair ${mac}\n`;
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    const clearTimers = () => {
+      while (timers.length) {
+        const timer = timers.pop();
+        if (timer) clearTimeout(timer);
+      }
+    };
+    let accumulated = "";
+    let pairSucceeded = false;
+    let followupScheduled = false;
+    let quitWritten = false;
+    const writeSafe = (writeStdin: (chunk: string) => void, chunk: string) => {
+      try { writeStdin(chunk); } catch {}
+    };
+    const writeQuit = (writeStdin: (chunk: string) => void) => {
+      if (quitWritten) return;
+      quitWritten = true;
+      clearTimers();
+      writeSafe(writeStdin, "quit\n");
+    };
+    const schedule = (delayMs: number, writeStdin: (chunk: string) => void, chunk: string) => {
+      timers.push(setTimeout(() => {
+        if (!quitWritten) writeSafe(writeStdin, chunk);
+      }, delayMs));
+    };
+    const scheduleFollowup = (writeStdin: (chunk: string) => void) => {
+      if (followupScheduled) return;
+      followupScheduled = true;
+      log("pair.session-keepalive", { mac, message: "Pairing succeeded; keeping bluetoothctl alive to trust/connect before the remote can drop the transient link." });
+      schedule(250, writeStdin, `trust ${mac}\n`);
+      schedule(750, writeStdin, `connect ${mac}\n`);
+      schedule(2_500, writeStdin, `connect ${mac} 0000110b-0000-1000-8000-00805f9b34fb\n`);
+      schedule(4_500, writeStdin, `connect ${mac} 0000110e-0000-1000-8000-00805f9b34fb\n`);
+      schedule(6_500, writeStdin, `info ${mac}\n`);
+      timers.push(setTimeout(() => writeQuit(writeStdin), 9_000));
+    };
+
+    const result = await run(argv, {
+      timeoutMs: timeoutMs + 12_000,
+      allowFailure: true,
+      input,
+      keepStdinOpen: true,
+      onStdout: (text, writeStdin) => {
+        accumulated += text;
+        if (legacyPin && /Enter PIN code:/i.test(text)) {
+          log("agent.legacy-pin", { mac, pin: legacyPin });
+          writeSafe(writeStdin, `${legacyPin}\n`);
+        }
+        if (!pairSucceeded && /Pairing successful/i.test(accumulated)) {
+          pairSucceeded = true;
+          scheduleFollowup(writeStdin);
+        }
+        if (!pairSucceeded && /Failed to pair|AuthenticationFailed|org\.bluez\.Error/i.test(accumulated)) {
+          writeQuit(writeStdin);
+        }
+      },
+    }).finally(clearTimers);
+
+    const combined = `${result.stdout}\n${result.stderr}`;
+    if (!pairSucceeded && /Pairing successful/i.test(combined)) pairSucceeded = true;
+    if (!pairSucceeded) {
+      result.exitCode = result.exitCode === 0 ? 1 : result.exitCode;
+      throw new Error(`${result.timedOut ? "Pairing timed out\n" : ""}${result.stderr || result.stdout || "Pairing failed"}`);
+    }
+    if (result.exitCode === 124) {
+      throw new Error(`Pair/connect session timed out\n${result.stderr || result.stdout || "Pairing failed"}`);
+    }
+    result.exitCode = 0;
     return result;
   }
 

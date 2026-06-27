@@ -40,6 +40,71 @@ Blauwerk implements specialized, automated safeguards for input (HID) and media 
 - **Connection Rollback Retries:** If a device fails to advertise during a rebond attempt, the rollback mechanism automatically retries the connection up to 3 times (with a 2-second delay). This gives the device's radio ample time to wake up and boot, ensuring you are never left stranded in a disconnected state.
 - **Media Subsystem Verification:** Reconnecting an audio device automatically triggers downstream verification of PipeWire, WirePlumber, and PulseAudio sinks, restoring active playback streams and cycling cards if the audio server is unresponsive.
 
+### Resolved failure class: desktop says connected, no audio output exists
+
+The Soundcore Boom 2 Pro exposed a common Linux Bluetooth split-brain:
+
+- COSMIC or another desktop panel can show the speaker as connected.
+- BlueZ can briefly report `Connected: yes`, or report a connected ACL link
+  while profile setup is still busy.
+- PipeWire/WirePlumber may still expose no `bluez_card.*` and no
+  `bluez_output.*`, so the device cannot be selected as an output.
+- Profile connects can fail transiently with errors such as
+  `org.bluez.Error.InProgress br-connection-busy`.
+
+Blauwerk now treats this as an audio graph failure, not as a successful
+Bluetooth connection. For A2DP playback, success requires a PipeWire sink, not
+only `Connected: yes`.
+
+The implemented recovery path:
+
+1. inspect BlueZ state and PipeWire cards/sinks separately;
+2. match exact MAC identities and likely sibling Classic/LE identities, for
+   example `F4:2B:7D:33:B8:D7` and `CB:2B:7D:33:B8:D7`;
+3. continue direct default/A2DP profile connection even when the device is not
+   freshly discoverable, because paired Classic devices can still be
+   page-connectable;
+4. restart WirePlumber when BlueZ has the link but PipeWire has no card;
+5. if the ACL link exists without an audio card, perform a serialized profile
+   reset: disconnect, short BR/EDR scan, trust, default connect, A2DP connect,
+   then re-check PipeWire;
+6. when a sink appears, set it as default and move existing playback streams to
+   it.
+
+The verified good terminal state is therefore:
+
+```text
+bluez_card.<device> exists
+bluez_output.<device>.* exists
+active profile: a2dp-sink
+audio.sinkFound=true
+```
+
+### Resolved failure class: device visible in scan, doctor says `targetSeen=false`
+
+`bluetoothctl` does not emit one stable machine format. During interactive
+discovery it can prefix events with prompts and ANSI colour sequences, for
+example:
+
+```text
+[bluetooth]# [CHG] Device AC:B1:EE:71:A1:51 RSSI: ...
+```
+
+Older Blauwerk parsing only accepted clean `[NEW] Device ...` and `[CHG]
+Device ...` lines. This made live discovery miss devices even while the initial
+dashboard appeared to find them. A second bug made the confusion worse:
+completed scans returned the cached `bluetoothctl devices` list, so stale BlueZ
+cache entries could be displayed as if they had just been seen over the air.
+
+The fix is deliberately strict:
+
+- ANSI/control sequences and prompt prefixes are stripped before event parsing;
+- live scan results contain only devices observed during that scan;
+- cached names and aliases may enrich a live hit, but cache entries no longer
+  prove that a target is currently advertising;
+- related Classic/LE identities are logged as hints, but are not treated as an
+  exact target hit.
+
 ## Compatibility and support claims
 
 Blauwerk is currently beta software. It can inspect standards-based devices

@@ -49,6 +49,18 @@ describe("BlueZ state parsing", () => {
     });
   });
 
+  test("extracts discovery events from colored bluetoothctl prompt lines", () => {
+    expect(parseDiscoveryLine("[bluetooth]# [\u001B[0;93mCHG\u001B[0m] Device AC:B1:EE:71:A1:51 RSSI: 0xffffffc1 (-63)")).toEqual({
+      mac: "AC:B1:EE:71:A1:51", rssi: -63,
+    });
+    expect(parseDiscoveryLine("\u001B[K[\u001B[0;92mNEW\u001B[0m] Device AC:B1:EE:71:A1:51 Tribit Home Speaker")).toEqual({
+      mac: "AC:B1:EE:71:A1:51", name: "Tribit Home Speaker",
+    });
+    expect(parseDiscoveryLine("[CHG] Device AC:B1:EE:71:A1:51 Class: 0x00240414 (2360340)")).toEqual({
+      mac: "AC:B1:EE:71:A1:51", class: "0x00240414 (2360340)",
+    });
+  });
+
   test("parses device properties: Alias, Icon, Class, and AddressType", () => {
     const raw = "Device AA:BB:CC:DD:EE:FF (public)\n Alias: My Speaker\n Icon: audio-card\n Class: 0x240404\n Paired: yes\n Connected: yes";
     const state = parseDeviceInfo(raw);

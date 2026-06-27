@@ -1,6 +1,6 @@
 import { describe, expect, test, mock, beforeAll, afterAll } from "bun:test";
 import type { Bluez } from "../src/bluez";
-import { Recovery, safeMatrix } from "../src/matrix";
+import { likelyRelatedIdentity, Recovery, safeMatrix } from "../src/matrix";
 import type { DeviceState, Attempt } from "../src/types";
 
 // Override Bun.sleep globally for this test file to prevent timeouts and run instantly
@@ -18,6 +18,12 @@ const state = (overrides: Partial<DeviceState> = {}): DeviceState => ({
 });
 
 describe("convergent recovery", () => {
+  test("recognizes likely sibling identities without treating them as exact target hits", () => {
+    expect(likelyRelatedIdentity("F4:2B:7D:33:B8:D7", state({ mac: "CB:2B:7D:33:B8:D7" }))).toBeTrue();
+    expect(likelyRelatedIdentity("F4:2B:7D:33:B8:D7", state({ mac: "F4:2B:7D:33:B8:D7" }))).toBeFalse();
+    expect(likelyRelatedIdentity("F4:2B:7D:33:B8:D7", state({ mac: "CB:2B:7D:33:B8:00" }))).toBeFalse();
+  });
+
   test("does not touch an already healthy device", async () => {
     let pairs = 0;
     let connects = 0;
@@ -115,6 +121,47 @@ describe("convergent recovery", () => {
     expect(removes).toBe(1);
     expect(pairs).toBe(1);
     expect(scans).toBe(2);
+  });
+
+  test("uses audio profile fallback when an audio device drops pairing but remains connectable", async () => {
+    let current = state({
+      paired: false,
+      bonded: false,
+      trusted: false,
+      connected: false,
+      icon: "audio-card",
+      uuids: ["Audio Sink (0000110b-0000-1000-8000-00805f9b34fb)"],
+    });
+    let pairAndConnects = 0;
+    let profileConnects = 0;
+    const fake = {
+      prepare: async () => {},
+      info: async () => current,
+      scanLive: async (_mode: string, _seconds: number, options: { onSeen?: (mac: string) => void }) => {
+        options.onSeen?.(current.mac);
+        return [current];
+      },
+      cancelPairing: async () => {},
+      pairAndConnect: async () => {
+        pairAndConnects++;
+        current = { ...current, paired: false, bonded: false, trusted: true, connected: false };
+        return { argv: [], exitCode: 0, stdout: "Pairing successful", stderr: "", timedOut: false };
+      },
+      trust: async () => { current = { ...current, trusted: true }; },
+      connect: async (_mac: string, profile?: string) => {
+        if (!profile) throw new Error("default connect failed");
+        if (profile) profileConnects++;
+        current = { ...current, connected: true };
+      },
+    } as unknown as Bluez;
+    const recovery = new Recovery(fake, {
+      scanSeconds: 1, pairTimeoutMs: 1, connectTimeoutMs: 1, requireBond: true,
+    });
+    const result = await recovery.run(current.mac, safeMatrix);
+    expect(pairAndConnects).toBe(1);
+    expect(profileConnects).toBeGreaterThanOrEqual(1);
+    expect(result.connected).toBeTrue();
+    expect(result.paired).toBeFalse();
   });
 
   test("disconnect-probes but does not remove state when explicit rebond cannot find the target", async () => {

@@ -1,4 +1,5 @@
 import { Bluez } from "./bluez";
+import { capabilities } from "./catalog";
 import { log } from "./log";
 import type { Attempt, DeviceState } from "./types";
 
@@ -22,6 +23,20 @@ export function healthy(state: DeviceState): boolean {
 
 export function usable(state: DeviceState): boolean {
   return state.paired && state.connected;
+}
+
+function macTail(mac: string): string {
+  return mac.split(":").slice(1).join(":");
+}
+
+export function likelyRelatedIdentity(targetMac: string, device: DeviceState): boolean {
+  return device.mac !== targetMac && macTail(device.mac) === macTail(targetMac);
+}
+
+function audioLike(state: DeviceState): boolean {
+  const caps = capabilities(state);
+  const label = `${state.name ?? ""} ${state.alias ?? ""} ${state.icon ?? ""}`.toLowerCase();
+  return caps.audioSink || caps.audioSource || /audio|speaker|sound|boom|headset|headphone|buds|earbuds/.test(label);
 }
 
 export class Recovery {
@@ -79,6 +94,27 @@ export class Recovery {
       
       if (connectError) {
         const errMsg = String(connectError);
+        if (audioLike(state)) {
+          for (const profile of ["0000110b-0000-1000-8000-00805f9b34fb", "0000110e-0000-1000-8000-00805f9b34fb"]) {
+            connectError = null;
+            await this.bluez.connect(mac, profile, this.options.connectTimeoutMs)
+              .catch(error => {
+                connectError = error;
+                log("connect.failed", { profile, error: String(error) });
+              });
+            state = await this.bluez.info(mac);
+            if (state.connected) break;
+          }
+          if (!connectError || state.connected) {
+            const deadline = Date.now() + 5_000;
+            do {
+              state = await this.bluez.info(mac);
+              if (state.connected) break;
+              await Bun.sleep(500);
+            } while (Date.now() < deadline);
+            return state;
+          }
+        }
         if (state.paired && /AuthenticationFailed|Key missing|Link key|Authentication Failed/i.test(errMsg)) {
           log("recovery.ctkd-mismatch", { mac, error: errMsg });
           log("recovery.reset-ctkd", { message: "CTKD / dual-bearer key mismatch detected. Removing host-side bond to force fresh link key exchange." });
@@ -136,6 +172,17 @@ export class Recovery {
         controller.abort();
       },
     });
+    if (!targetSeen) {
+      for (const device of devices.filter(device => likelyRelatedIdentity(mac, device))) {
+        log("scan.related-identity", {
+          target: mac,
+          seen: device.mac,
+          name: device.alias ?? device.name,
+          reason: "same-lower-5-octets",
+          message: "A likely LE/random sibling identity was seen, but the exact target address was not advertising. Use normal host pairing mode or inspect the seen address if this is an LE-only function.",
+        });
+      }
+    }
     log("scan.end", { devices: devices.length, targetSeen, stoppedEarly: targetSeen });
     if (targetSeen) {
       this.targetSeenInPreflight = true;
@@ -249,7 +296,9 @@ export class Recovery {
               pin = pins[index % pins.length];
               log("recovery.legacy-pin-attempt", { mac, pin });
             }
-            const result = await this.bluez.pair(mac, attempt.agent, this.options.pairTimeoutMs, pin);
+            const result = audioLike(state) && attempt.agent === "NoInputNoOutput" && typeof this.bluez.pairAndConnect === "function"
+              ? await this.bluez.pairAndConnect(mac, attempt.agent, this.options.pairTimeoutMs, pin)
+              : await this.bluez.pair(mac, attempt.agent, this.options.pairTimeoutMs, pin);
             log("pair.result", {
               exitCode: result.exitCode,
               output: `${result.stdout}\n${result.stderr}`.trim().slice(-2_000),
@@ -271,6 +320,13 @@ export class Recovery {
         log("attempt.end", { paired: state.paired, bonded: state.bonded, connected: state.connected });
         if (this.mayStop(state)) return state;
         if (pairedThisAttempt && !state.paired) {
+          if (audioLike(state)) {
+            log("recovery.pair-lost-audio-fallback", { mac, message: "Pairing was dropped; attempting direct audio profile connection before giving up." });
+            state = await this.connect(mac);
+            state = await this.settleBond(mac, state);
+            log("attempt.audio-fallback", { paired: state.paired, bonded: state.bonded, connected: state.connected });
+            if (state.connected) return state;
+          }
           log("recovery.stop", {
             reason: "pair-lost",
             message: "Remote or controller dropped the successful pairing. This signature (transient pair followed by immediate loss) typically indicates that the remote device's bond/pairing table is full. Clear the pairing history on your device and try again."

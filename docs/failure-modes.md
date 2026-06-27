@@ -35,6 +35,65 @@ profiles, domains and user intents; unknown UUIDs are retained as evidence.
 Advertising a capability is not considered proof that its intended function is
 working.
 
+## Implementation notes from the Soundcore/COSMIC recovery
+
+Two concrete bugs were fixed during the Soundcore Boom 2 Pro recovery. They are
+documented here because they affect generic Bluetooth behaviour across devices
+and desktop environments.
+
+### Live discovery must not be confused with BlueZ cache
+
+The dashboard could show a device during discovery while `doctor` later logged
+`targetSeen=false`. The root cause was not the speaker or the distro. It was
+our own discovery abstraction:
+
+- `bluetoothctl` can print discovery events with prompts and ANSI colour
+  escapes, for example `[bluetooth]# [CHG] Device ...`;
+- the parser only accepted clean event lines, so valid live events were missed;
+- after a scan, the implementation returned `bluetoothctl devices`, which is a
+  cache of known devices, not proof that each device was just observed.
+
+Current behaviour:
+
+1. strip ANSI/control sequences and prompt prefixes before parsing discovery
+   lines;
+2. parse `[NEW]` and `[CHG]` device events, RSSI and class updates from the live
+   stream;
+3. return only devices observed in the current scan;
+4. enrich those live hits with cached names or aliases when available;
+5. log likely Classic/LE sibling identities as hints, but do not treat them as
+   exact target matches.
+
+This preserves the important safety invariant: destructive recovery steps must
+not run merely because a stale cache entry exists.
+
+### Desktop connected state is not the same as playable audio
+
+COSMIC could show the Soundcore speaker as connected while PipeWire exposed no
+output device. BlueZ and the desktop were not enough to prove success:
+
+- BlueZ may have an ACL link, or a profile operation may still be in progress;
+- `bluetoothctl connect` can return `org.bluez.Error.InProgress` or
+  `br-connection-busy`;
+- WirePlumber can fail to materialize the A2DP transport as `bluez_card.*`;
+- without `bluez_output.*`, applications have nowhere to route playback.
+
+Current A2DP recovery verifies the whole stack:
+
+1. inspect BlueZ and PipeWire independently;
+2. match exact MACs and likely sibling identities in PipeWire names, because
+   some devices expose related Classic/LE addresses;
+3. try direct default and A2DP connects even when the device was not freshly
+   discoverable, since paired Classic devices can still be page-connectable;
+4. restart WirePlumber when BlueZ is connected but no card appears;
+5. if the ACL link exists without a card, perform a serialized profile reset:
+   disconnect, wait, short BR/EDR scan, trust, default connect, A2DP connect,
+   wait for PipeWire;
+6. set the discovered sink as default and move existing playback streams.
+
+The verified success condition for speaker playback is now `sinkFound=true`
+with an A2DP sink, not merely `Connected: yes`.
+
 ## Discovery and identity
 
 | Failure mode | Detection | Current response | Status / target |
@@ -104,11 +163,11 @@ working.
 | Failure mode | Detection | Current response | Status / target |
 | --- | --- | --- | --- |
 | PipeWire server unavailable | pactl failure | restart user audio stack | handled |
-| WirePlumber BlueZ monitor missing | no card despite connected audio UUID | restart WirePlumber once | partial: verify plugin/package |
+| WirePlumber BlueZ monitor missing | no card despite connected audio UUID | restart WirePlumber, then serialized profile reset | partial: verify plugin/package |
 | `bluez_card` missing | pactl inventory | A2DP recovery | handled |
 | Card exists but output sink is missing | card/sink inventory | activate A2DP profile | handled |
 | A2DP transport Acquire fails | currently only journal evidence | WirePlumber & profile resets | handled |
-| Transport is busy | connect error | serialized retry | partial |
+| Transport is busy | connect error | serialized default/A2DP retry and profile reset | partial: direct D-Bus operation tracking |
 | No common codec | endpoint negotiation failure | no codec diagnosis | planned: codec intersection and SBC fallback |
 | High-quality codec is unstable | repeated transport loss | fallback SBC profile cycling | handled |
 | LE Audio device lacks BAP support | BAP UUID/role | BAP UUID presence check | handled |
@@ -116,7 +175,7 @@ working.
 | HFP/HSP backend missing | no headset profile | WirePlumber backend config check | handled |
 | Microphone use downgrades music quality | profile change | not explained | planned: `music` versus `call` intent |
 | Absolute volume is broken | mute/jump behavior | not detected | planned: per-device volume quirk |
-| Sink exists but desktop UI omits it | PipeWire okay, UI missing | state reveals boundary | partial: set default/reload UI hint |
+| Sink exists but desktop UI omits it | PipeWire okay, UI missing | set default sink and move active streams | partial: desktop UI reload remains external |
 | Application stays on old sink | stream routing inventory | automatic pactl stream migration | handled |
 | Wrong default output | metadata/default node | automatic default sink routing | handled |
 | Codec latency is poor for gaming | selected codec/profile | not measured | planned: `gaming-audio` policy |

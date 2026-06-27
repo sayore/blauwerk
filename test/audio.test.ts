@@ -79,6 +79,17 @@ describe("AudioManager", () => {
     expect(state.availableProfiles).toEqual(["off", "a2dp-sink"]);
   });
 
+  test("matches PipeWire nodes exposed under a sibling Bluetooth identity", async () => {
+    const manager = new MockAudioManager(
+      [{ name: "bluez_card.cb_2b_7d_33_b8_d7", active_profile: "a2dp-sink" }],
+      [{ name: "bluez_output.cb_2b_7d_33_b8_d7.1" }],
+    );
+    const state = await manager.state("F4:2B:7D:33:B8:D7");
+    expect(state.cardFound).toBeTrue();
+    expect(state.sinkFound).toBeTrue();
+    expect(state.cardName).toBe("bluez_card.cb_2b_7d_33_b8_d7");
+  });
+
   test("handles missing pactl command during state inquiry", async () => {
     commandExistsMock = async () => false;
     const manager = new MockAudioManager();
@@ -242,17 +253,20 @@ describe("AudioManager", () => {
     expect(audioRestarted).toBeTrue();
   });
 
-  test("ensure scans and fails if target MAC is not discoverable", async () => {
+  test("ensure attempts direct profile connect even if target MAC is not discoverable", async () => {
     const manager = new MockAudioManager();
+    const connectProfiles: (string | undefined)[] = [];
     const mockBluez = {
       info: async () => ({ connected: false, servicesResolved: false, uuids: [] }),
       scan: async () => [{ mac: "FF:FF:FF:FF:FF:FF" }],
+      connect: async (_mac: string, profile?: string) => { connectProfiles.push(profile); },
     } as any;
 
     const state = await manager.ensure(mockBluez, "AC:B1:EE:71:A1:51");
     expect(state.bluetoothConnected).toBeFalse();
     expect(state.targetSeen).toBeFalse();
-    expect(state.error).toBe("Bonded device is not currently discoverable/connectable");
+    expect(connectProfiles).toContain(undefined);
+    expect(connectProfiles).toContain("0000110b-0000-1000-8000-00805f9b34fb");
   });
 
   test("ensure triggers wireplumber restart if card is missing after connect", async () => {

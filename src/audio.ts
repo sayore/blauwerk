@@ -14,6 +14,14 @@ function text(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
+function macNeedles(mac: string): string[] {
+  const lower = mac.toLowerCase();
+  const underscore = lower.replaceAll(":", "_");
+  const tail = lower.split(":").slice(1).join(":");
+  const tailUnderscore = tail.replaceAll(":", "_");
+  return [...new Set([lower, underscore, tail, tailUnderscore].filter(Boolean))];
+}
+
 export class AudioManager {
   protected async pactlJson(kind: "cards" | "sinks"): Promise<{ data: JsonObject[]; error?: string }> {
     if (!await commandExists("pactl")) return { data: [], error: "pactl is missing" };
@@ -24,7 +32,7 @@ export class AudioManager {
   }
 
   async state(mac: string): Promise<AudioState> {
-    const needles = [mac.toLowerCase(), mac.replaceAll(":", "_").toLowerCase()];
+    const needles = macNeedles(mac);
     const [cardsResult, sinksResult] = await Promise.all([this.pactlJson("cards"), this.pactlJson("sinks")]);
     const matches = (entry: JsonObject) => needles.some(needle => JSON.stringify(entry).toLowerCase().includes(needle));
     const card = cardsResult.data.find(matches);
@@ -151,13 +159,35 @@ export class AudioManager {
       const devices = await bluez.scan("bredr", 10);
       targetSeen = devices.some(device => device.mac === mac);
       if (!targetSeen) {
-        state = { ...state, bluetoothConnected: false, targetSeen, error: "Bonded device is not currently discoverable/connectable" };
-        log("audio.result", { ...state });
-        return state;
+        const related = devices.find(device => {
+          const deviceTail = device.mac.split(":").slice(1).join(":");
+          const macTail = mac.split(":").slice(1).join(":");
+          return device.mac !== mac && deviceTail === macTail;
+        });
+        if (related) {
+          log("audio.related-identity", {
+            target: mac,
+            seen: related.mac,
+            name: related.alias ?? related.name,
+            message: "Continuing audio recovery because a likely sibling identity is present.",
+          });
+        } else {
+          log("audio.target-not-seen", {
+            mac,
+            message: "Target was not seen in discovery, but audio recovery will still try a direct profile connect because paired Classic devices may be page-connectable without advertising.",
+          });
+        }
       }
     }
 
     let connectError: string | undefined;
+    let defaultConnectError: string | undefined;
+    log("audio.reconnect", { phase: "default" });
+    await bluez.connect(mac, undefined, 15_000).catch(error => {
+      defaultConnectError = String(error);
+      log("audio.default-connect", { error: defaultConnectError });
+    });
+
     log("audio.reconnect", { phase: "a2dp", uuid: A2DP_SINK_UUID });
     
     // Ensure the device is trusted to prevent BlueZ from rejecting the profile connection
@@ -180,6 +210,47 @@ export class AudioManager {
       await bluez.restartWireplumber();
       state = await this.wait(mac, 10);
     }
+    if (bluetooth.connected && !state.cardFound) {
+      log("audio.reconnect", { phase: "profile-reset", message: "BlueZ ACL is connected but PipeWire has no card; resetting the audio profile connection." });
+      if (typeof bluez.disconnect === "function") {
+        await bluez.disconnect(mac).catch(error => log("audio.disconnect", { error: String(error) }));
+      }
+      await Bun.sleep(2_000);
+      const resetScan = typeof bluez.scan === "function"
+        ? await bluez.scan("bredr", 6).catch(error => {
+          log("audio.reset-scan", { error: String(error) });
+          return [];
+        })
+        : [];
+      log("audio.reset-scan", {
+        targetSeen: resetScan.some(device => device.mac === mac),
+        devices: resetScan.length,
+      });
+      if (typeof bluez.trust === "function") {
+        await bluez.trust(mac).catch(error => log("audio.trust", { error: String(error) }));
+      }
+      await bluez.connect(mac, undefined, 25_000).catch(error => {
+        defaultConnectError = String(error);
+        log("audio.default-reconnect", { error: defaultConnectError });
+      });
+      await this.waitBluetooth(bluez, mac, true, 8);
+      state = await this.wait(mac, 8);
+      bluetooth = await bluez.info(mac);
+    }
+    if (bluetooth.connected && !state.cardFound) {
+      await bluez.connect(mac, A2DP_SINK_UUID, 30_000).catch(error => {
+        connectError = String(error);
+        log("audio.a2dp-reconnect", { error: connectError });
+      });
+      await this.waitBluetooth(bluez, mac, true, 10);
+      state = await this.wait(mac, 15);
+      bluetooth = await bluez.info(mac);
+    }
+    if (bluetooth.connected && !state.cardFound) {
+      log("audio.reconnect", { phase: "wireplumber-after-profile-reset" });
+      await bluez.restartWireplumber();
+      state = await this.wait(mac, 10);
+    }
     if (state.cardFound && !state.sinkFound) {
       log("audio.reconnect", { phase: "profile-cycle" });
       await this.cycleCardProfile(state.cardName!, state);
@@ -193,7 +264,12 @@ export class AudioManager {
       await this.postConnectReconcile(state.sinkName);
     }
     bluetooth = await bluez.info(mac);
-    state = { ...state, bluetoothConnected: bluetooth.connected, targetSeen, error: state.error ?? connectError };
+    state = {
+      ...state,
+      bluetoothConnected: bluetooth.connected,
+      targetSeen,
+      error: state.sinkFound ? undefined : state.error ?? connectError ?? defaultConnectError,
+    };
     log("audio.result", { ...state });
     return state;
   }

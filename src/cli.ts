@@ -91,7 +91,7 @@ function recoveryFor(bluez: Bluez): Recovery {
 }
 
 async function ensurePlayback(bluez: Bluez, state: Awaited<ReturnType<Bluez["info"]>>) {
-  return state.connected && capabilities(state).audioSink ? new AudioManager().ensure(bluez, state.mac) : undefined;
+  return capabilities(state).audioSink ? new AudioManager().ensure(bluez, state.mac) : undefined;
 }
 
 function table(devices: Awaited<ReturnType<DeviceCatalog["list"]>>): void {
@@ -429,8 +429,9 @@ async function main(): Promise<void> {
         printDeviceDashboard(state, capabilities(state), audio, configIssues, power, optimizeLatency);
       }
       
-      if (!state.paired) process.exitCode = 1;
-      else if (!healthy(state) || (capabilities(state).audioSink && !audio?.sinkFound)) process.exitCode = 2;
+      const audioPlayable = Boolean(audio?.sinkFound);
+      if (!state.paired && !audioPlayable) process.exitCode = 1;
+      else if ((!healthy(state) && !audioPlayable) || (capabilities(state).audioSink && !audioPlayable)) process.exitCode = 2;
       return;
     }
     case "simulate": {

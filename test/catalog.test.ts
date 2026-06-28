@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { capabilities, mergeDuplicateIdentities, selectBearerForIntent } from "../src/catalog";
+import { capabilities, DeviceCatalog, mergeDuplicateIdentities, selectBearerForIntent } from "../src/catalog";
 import type { DeviceState } from "../src/types";
 
 describe("capability abstraction", () => {
@@ -51,6 +51,38 @@ describe("capability abstraction", () => {
       expect(firstMerged.uuids).toContain("0000110b-0000-1000-8000-00805f9b34fb");
       expect(firstMerged.uuids).toContain("0000180f-0000-1000-8000-00805f9b34fb");
     }
+  });
+
+  test("keeps anonymous devices while merging named duplicate identities", () => {
+    const anonymous: DeviceState = {
+      mac: "AA:00:00:00:00:01", available: true, paired: false, trusted: false,
+      blocked: false, connected: false, uuids: [], raw: "",
+    };
+    const named: DeviceState = {
+      mac: "AA:00:00:00:00:02", name: "Named Device", available: true, paired: false, trusted: false,
+      blocked: false, connected: false, uuids: [], raw: "",
+    };
+
+    expect(mergeDuplicateIdentities([anonymous, named]).map(device => device.mac)).toEqual([anonymous.mac, named.mac]);
+  });
+
+  test("catalog list falls back to scan data if a device disappears before info lookup", async () => {
+    const fallback: DeviceState = {
+      mac: "AA:00:00:00:00:03", available: true, paired: false, trusted: false,
+      blocked: false, connected: false, uuids: [], raw: "",
+    };
+    const catalog = new DeviceCatalog({
+      devices: async () => [],
+      scan: async () => [fallback],
+      info: async () => {
+        throw new Error("not available");
+      },
+      trust: async () => {},
+      connect: async () => {},
+      disconnect: async () => {},
+    });
+
+    expect((await catalog.list({ scan: true })).map(device => device.mac)).toEqual([fallback.mac]);
   });
 
   test("resolves correct bearer for intent", () => {

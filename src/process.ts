@@ -6,6 +6,11 @@ export class CommandError extends Error {
   }
 }
 
+export interface ProcessControl {
+  endStdin(): void;
+  terminate(exitCode?: number): void;
+}
+
 export async function run(argv: string[], options: {
   timeoutMs?: number;
   input?: string;
@@ -13,7 +18,7 @@ export async function run(argv: string[], options: {
   env?: Record<string, string>;
   interactive?: boolean;
   keepStdinOpen?: boolean;
-  onStdout?: (text: string, writeStdin: (chunk: string) => void) => void;
+  onStdout?: (text: string, writeStdin: (chunk: string) => void, control: ProcessControl) => void;
 } = {}): Promise<RunResult> {
   const timeoutMs = options.timeoutMs ?? 30_000;
   const env = { ...Bun.env, ...options.env };
@@ -50,25 +55,50 @@ export async function run(argv: string[], options: {
   let stdoutText = "";
   let stderrText = "";
   let readPromise = Promise.resolve();
+  let timedOut = false;
+  let requestedExitCode: number | undefined;
+  let forceTimer: ReturnType<typeof setTimeout> | undefined;
+
+  const control: ProcessControl = {
+    endStdin() {
+      try { child.stdin?.end(); } catch {}
+    },
+    terminate(exitCode?: number) {
+      if (exitCode !== undefined) requestedExitCode = exitCode;
+      if (child.exitCode === null) {
+        child.kill("SIGTERM");
+        forceTimer ??= setTimeout(() => child.kill("SIGKILL"), 2_000);
+      }
+    },
+  };
 
   const readStream = async (stream: ReadableStream<Uint8Array>, isStdout: boolean) => {
     const reader = stream.getReader();
     const decoder = new TextDecoder();
     while (true) {
       const { value, done } = await reader.read();
-      if (done) break;
-      const text = decoder.decode(value);
+      const text = done ? decoder.decode() : decoder.decode(value, { stream: true });
+      if (done) {
+        if (!text) break;
+      }
       if (isStdout) {
         stdoutText += text;
-        if (options.interactive) globalThis.process.stdout.write(value);
+        if (options.interactive) {
+          if (value) globalThis.process.stdout.write(value);
+          else globalThis.process.stdout.write(text);
+        }
         const stdin = child.stdin;
         if (options.onStdout && stdin) {
-          options.onStdout(text, (chunk) => stdin.write(chunk));
+          options.onStdout(text, (chunk) => stdin.write(chunk), control);
         }
       } else {
         stderrText += text;
-        if (options.interactive) globalThis.process.stderr.write(value);
+        if (options.interactive) {
+          if (value) globalThis.process.stderr.write(value);
+          else globalThis.process.stderr.write(text);
+        }
       }
+      if (done) break;
     }
   };
 
@@ -77,8 +107,6 @@ export async function run(argv: string[], options: {
     readStream(child.stderr, false)
   ]).then(() => {});
 
-  let timedOut = false;
-  let forceTimer: ReturnType<typeof setTimeout> | undefined;
   const timer = setTimeout(() => {
     timedOut = true;
     child.kill("SIGTERM");
@@ -99,7 +127,7 @@ export async function run(argv: string[], options: {
       globalThis.process.stdin.pause();
     }
   });
-  const result = { argv, exitCode: timedOut ? 124 : exitCode, stdout, stderr, timedOut };
+  const result = { argv, exitCode: timedOut ? 124 : requestedExitCode ?? exitCode, stdout, stderr, timedOut };
   if (result.exitCode !== 0 && !options.allowFailure) throw new CommandError(result);
   return result;
 }

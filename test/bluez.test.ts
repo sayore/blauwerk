@@ -1,5 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { normalizeMac, parseDeviceInfo, parseDiscoveryLine } from "../src/bluez";
+import {
+  cleanBluetoothctlOutput,
+  connectOutputShowsCommandSuccess,
+  connectOutputShowsConnected,
+  connectOutputShowsProgress,
+  normalizeMac,
+  parseControllerState,
+  parseDeviceInfo,
+  parseDiscoveryLine,
+} from "../src/bluez";
 import { healthy } from "../src/matrix";
 
 describe("BlueZ state parsing", () => {
@@ -59,6 +68,40 @@ describe("BlueZ state parsing", () => {
     expect(parseDiscoveryLine("[CHG] Device AC:B1:EE:71:A1:51 Class: 0x00240414 (2360340)")).toEqual({
       mac: "AC:B1:EE:71:A1:51", class: "0x00240414 (2360340)",
     });
+  });
+
+  test("recognizes profile connect progress and connected events from noisy bluetoothctl output", () => {
+    const noisy = "Waiting to connect to bluetoothd...\r\u001B[0;94m[bluetoothctl]> \u001B[0mconnect AC:B1:EE:71:A1:51 0000110b-0000-1000-8000-00805f9b34fb\n[\u001B[0;93mCHG\u001B[0m] Device AC:B1:EE:71:A1:51 Connected: yes\n\u001B[0;94m[Tribit Home Speaker]> \u001B[0m";
+    expect(connectOutputShowsConnected(noisy)).toBeTrue();
+    expect(cleanBluetoothctlOutput(noisy)).not.toContain("\u001B");
+    expect(cleanBluetoothctlOutput(noisy)).not.toContain("[bluetoothctl]>");
+  });
+
+  test("does not treat an ACL state probe as profile command success", () => {
+    expect(connectOutputShowsConnected("[CHG] Device AC:B1:EE:71:A1:51 Connected: yes")).toBeTrue();
+    expect(connectOutputShowsCommandSuccess("[CHG] Device AC:B1:EE:71:A1:51 Connected: yes")).toBeFalse();
+    expect(connectOutputShowsCommandSuccess("Connection successful")).toBeTrue();
+  });
+
+  test("recognizes BlueZ in-progress profile connect as recoverable progress", () => {
+    expect(connectOutputShowsProgress("Failed to connect: org.bluez.Error.InProgress br-connection-busy")).toBeTrue();
+  });
+
+  test("detects controller power transition states", () => {
+    const state = parseControllerState(`Controller F4:4E:FC:EE:86:BF (public)
+      Powered: yes
+      PowerState: on-disabling
+      Discovering: no`);
+    expect(state.controllerAvailable).toBeTrue();
+    expect(state.controllerMac).toBe("F4:4E:FC:EE:86:BF");
+    expect(state.powerState).toBe("on-disabling");
+    expect(state.powerTransitionStuck).toBeTrue();
+  });
+
+  test("detects missing default controller output", () => {
+    const state = parseControllerState("No default controller available");
+    expect(state.controllerAvailable).toBeFalse();
+    expect(state.controllerMac).toBeUndefined();
   });
 
   test("parses device properties: Alias, Icon, Class, and AddressType", () => {

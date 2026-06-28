@@ -1,6 +1,6 @@
 import { join } from "node:path";
-import { commandExists, run } from "./process";
-import type { Agent, DeviceState, RunResult, ScanMode } from "./types";
+import { commandExists, run, type ProcessControl } from "./process";
+import type { Agent, BluetoothHostState, DeviceState, RunResult, ScanMode } from "./types";
 import { log } from "./log";
 
 const MAC = /^[0-9A-F]{2}(?::[0-9A-F]{2}){5}$/;
@@ -45,6 +45,60 @@ export interface DiscoveryEvent {
 
 function stripAnsi(value: string): string {
   return value.replace(/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, "");
+}
+
+function defaultEnv(): Record<string, string> {
+  const env = Object.fromEntries(Object.entries(Bun.env).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
+  if (env.DBUS_SESSION_BUS_ADDRESS === undefined && typeof process.getuid === "function") {
+    env.DBUS_SESSION_BUS_ADDRESS = `unix:path=/run/user/${process.getuid()}/bus`;
+  }
+  return env;
+}
+
+export function cleanBluetoothctlOutput(value: string): string {
+  return stripAnsi(value)
+    .replace(/\r/g, "\n")
+    .split(/\n+/)
+    .map(line => line.trim())
+    .map(line => line.replace(/^\[[^\]]+\][>#]\s*/, "").trim())
+    .filter(Boolean)
+    .filter(line => !/^\[[^\]]+\][>#]?\s*$/.test(line))
+    .filter(line => !/^SupportedUUIDs:/i.test(line))
+    .filter(line => !/^Agent registered$/i.test(line))
+    .join("\n");
+}
+
+export function connectOutputShowsProgress(value: string): boolean {
+  return /org\.bluez\.Error\.InProgress|br-connection-busy|Operation already in progress/i.test(value);
+}
+
+export function connectOutputShowsConnected(value: string): boolean {
+  return /Connection successful|Connected:\s*yes|ServicesResolved:\s*yes/i.test(value);
+}
+
+export function connectOutputShowsCommandSuccess(value: string): boolean {
+  return /Connection successful/i.test(value);
+}
+
+function summarizeBluetoothctlFailure(value: string, fallback: string): string {
+  const clean = cleanBluetoothctlOutput(value);
+  const lines = clean.split(/\n+/).filter(Boolean);
+  const failure = [...lines].reverse().find(line => /Failed to|org\.bluez\.Error|not available|Authentication|timed out/i.test(line));
+  return (failure ?? lines.slice(-4).join("\n") ?? fallback).slice(0, 1_000) || fallback;
+}
+
+export function parseControllerState(raw: string): Pick<BluetoothHostState, "controllerAvailable" | "controllerMac" | "powered" | "powerState" | "discovering" | "powerTransitionStuck"> {
+  const value = (key: string) => raw.match(new RegExp(`^\\s*${key}:\\s*(.+)$`, "mi"))?.[1]?.trim();
+  const controllerMac = raw.match(/^Controller\s+([0-9A-F:]{17})/mi)?.[1];
+  const powerState = value("PowerState");
+  return {
+    controllerAvailable: Boolean(controllerMac) && !/No default controller available/i.test(raw),
+    controllerMac,
+    powered: value("Powered")?.toLowerCase() === "yes",
+    powerState,
+    discovering: value("Discovering")?.toLowerCase() === "yes",
+    powerTransitionStuck: powerState === undefined ? undefined : /-(?:enabling|disabling)$/i.test(powerState),
+  };
 }
 
 export function parseDiscoveryLine(line: string): DiscoveryEvent | undefined {
@@ -121,7 +175,7 @@ export class Bluez {
     agent?: Agent,
     skipSelect = false,
     interactive = false,
-    onStdout?: (text: string, writeStdin: (chunk: string) => void) => void
+    onStdout?: (text: string, writeStdin: (chunk: string) => void, control?: ProcessControl) => void
   ) {
     if (!skipSelect && !this.selectedAdapter && args[0] !== "list" && !(args[0] === "show" && args.length > 1)) {
       await this.resolveAdapter().catch(() => {});
@@ -136,6 +190,7 @@ export class Bluez {
       let cleanupOnExit: (() => void) | undefined;
       
       const isConnect = args[0] === "connect";
+      const isProfileConnect = isConnect && args.length > 2;
       const isPair = args[0] === "pair";
       
       if (!interactive && (isConnect || isPair)) {
@@ -173,10 +228,10 @@ export class Bluez {
           timers.push(setTimeout(() => writeQuit(writeStdin), 9_000));
         };
         cleanupOnExit = clearTimers;
-        wrappedOnStdout = (text, writeStdin) => {
+        wrappedOnStdout = (text, writeStdin, control) => {
           accumulated += text;
           if (onStdout) {
-            try { onStdout(text, writeStdin); } catch {}
+            try { onStdout(text, writeStdin, control); } catch {}
           }
           if (quitWritten) return;
 
@@ -192,8 +247,15 @@ export class Bluez {
               }
               timers.push(setTimeout(() => writeQuit(writeStdin), 12_000));
             }
-            const hasFinished = /Connection successful|Failed to connect|Connection failed|ProfileUnavailable|org\.bluez\.Error|Connected:\s*yes|ServicesResolved:\s*yes/i.test(accumulated);
-            if (hasFinished) writeQuit(writeStdin);
+            const hasSuccess = connectOutputShowsCommandSuccess(accumulated) || (!isProfileConnect && connectOutputShowsConnected(accumulated));
+            const hasFailure = /Failed to connect|Connection failed|ProfileUnavailable|org\.bluez\.Error/i.test(accumulated);
+            if (hasSuccess) {
+              writeQuit(writeStdin);
+              control?.endStdin();
+              timers.push(setTimeout(() => control?.terminate(0), 750));
+            } else if (hasFailure) {
+              writeQuit(writeStdin);
+            }
             return;
           }
 
@@ -345,7 +407,7 @@ export class Bluez {
     }
     const duration = Math.max(1, seconds);
     const session = Bun.spawn(["bluetoothctl"], {
-      stdin: "pipe", stdout: "pipe", stderr: "pipe", env: Bun.env,
+      stdin: "pipe", stdout: "pipe", stderr: "pipe", env: defaultEnv(),
     });
     const abortSession = () => { if (session.exitCode === null) session.kill("SIGKILL"); };
     options.signal?.addEventListener("abort", abortSession, { once: true });
@@ -407,9 +469,9 @@ export class Bluez {
     } finally {
       options.signal?.removeEventListener("abort", abortSession);
       if (session.exitCode === null) session.kill("SIGKILL");
-      // BlueZ drops this client's discovery request when the D-Bus client exits.
-      // Avoid blocking an interactive selection on a second bluetoothctl process.
-      if (!options.signal?.aborted) await this.stopScan(2_000);
+      await this.stopScan(2_000).catch(error => {
+        log("scan.stop.failed", { error: String(error) });
+      });
     }
     const liveDevices = [...seen.values()];
     if (options.signal?.aborted || !liveDevices.length) return liveDevices;
@@ -568,8 +630,38 @@ export class Bluez {
   }
   async connect(mac: string, profile?: string, timeoutMs = 25_000): Promise<void> {
     if (this.dryRun) return;
-    const result = await this.bt(["connect", normalizeMac(mac), ...(profile ? [profile] : [])], timeoutMs);
-    if (result.exitCode !== 0) throw new Error(result.stderr || result.stdout || "Connection failed");
+    mac = normalizeMac(mac);
+    await this.stopScan(2_000).catch(error => {
+      log("connect.scan-off.failed", { mac, profile: profile ?? "default", error: String(error) });
+    });
+    const result = await this.bt(["connect", mac, ...(profile ? [profile] : [])], timeoutMs);
+    const output = `${result.stdout}\n${result.stderr}`;
+    const commandSucceeded = connectOutputShowsCommandSuccess(output);
+    const state = await this.info(mac).catch(() => null);
+    if (profile) {
+      if (result.exitCode === 0 && commandSucceeded && state?.connected) return;
+      if (result.exitCode === 0 && commandSucceeded) {
+        throw new Error("BlueZ reported a profile connection, but the device was disconnected when re-read");
+      }
+    } else if (state?.connected) {
+      return;
+    }
+    if (result.exitCode !== 0) {
+      if (connectOutputShowsConnected(output) && !/Failed to connect/i.test(output)) {
+        throw new Error("BlueZ reported a transient connection, but the device was disconnected when re-read");
+      }
+      throw new Error(summarizeBluetoothctlFailure(output, "Connection failed"));
+    }
+    if (profile && state?.connected) {
+      throw new Error("BlueZ connected the device ACL, but did not confirm the requested profile connection");
+    }
+    if (connectOutputShowsProgress(output)) {
+      throw new Error("BlueZ connect is still in progress; device was not connected when re-read");
+    }
+    if (connectOutputShowsConnected(output)) {
+      throw new Error("BlueZ reported Connected: yes, but the device was disconnected when re-read");
+    }
+    throw new Error(summarizeBluetoothctlFailure(output, "Connect command finished without a persistent Connected: yes state"));
   }
   async disconnect(mac: string): Promise<void> { if (!this.dryRun) await this.bt(["disconnect", normalizeMac(mac)]); }
   async remove(mac: string): Promise<void> { if (!this.dryRun) await this.bt(["remove", normalizeMac(mac)]); }
@@ -627,9 +719,63 @@ export class Bluez {
 
   async findCompetingManagers(): Promise<string[]> {
     if (!await commandExists("pgrep")) return [];
-    const result = await run(["pgrep", "-l", "-f", "blueman|gnome-bluetooth|bluedevil"], { allowFailure: true, timeoutMs: 5_000 });
+    const pattern = "blueman|Blueman|gnome-bluetooth|bluedevil|cosmic-applet-bluetooth|blauwerk-scanner|src/cli\\.ts daemon";
+    const result = await run(["pgrep", "-a", "-f", pattern], { allowFailure: true, timeoutMs: 5_000 });
     if (result.exitCode !== 0) return [];
-    return result.stdout.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+    return result.stdout.split(/\r?\n/)
+      .map(line => line.trim())
+      .filter(Boolean)
+      .filter(line => !/\bpgrep\b/.test(line));
+  }
+
+  private async kernelModuleLoaded(name: string): Promise<boolean | undefined> {
+    if (!await commandExists("lsmod")) return undefined;
+    const result = await run(["lsmod"], { allowFailure: true, timeoutMs: 5_000 });
+    if (result.exitCode !== 0) return undefined;
+    return new RegExp(`^${name}\\s`, "m").test(result.stdout);
+  }
+
+  async hostState(): Promise<BluetoothHostState> {
+    const adapters = await this.listAdapters().catch(() => []);
+    const preferred = this.selectedAdapter ?? adapters.find(adapter => adapter.default)?.mac ?? adapters[0]?.mac;
+    const showCmd = preferred ? ["show", preferred] : ["show"];
+    const [show, managers, btusbLoaded] = await Promise.all([
+      this.bt(showCmd, 8_000, undefined, true).catch(error => ({
+        exitCode: 1,
+        stdout: "",
+        stderr: String(error),
+        timedOut: false,
+        argv: [],
+      } satisfies RunResult)),
+      this.findCompetingManagers().catch(() => []),
+      this.kernelModuleLoaded("btusb"),
+    ]);
+    const controller = parseControllerState(`${show.stdout}\n${show.stderr}`);
+    return {
+      ...controller,
+      controllerAvailable: controller.controllerAvailable && show.exitCode === 0,
+      btusbLoaded,
+      competingManagers: managers,
+      backgroundScannerActive: managers.some(manager => /blauwerk-scanner|src\/cli\.ts daemon/i.test(manager)),
+    };
+  }
+
+  private hostIssues(state: BluetoothHostState): string[] {
+    const issues: string[] = [];
+    if (!state.controllerAvailable && state.btusbLoaded === false) {
+      issues.push("Bluetooth controller is unavailable because btusb is not loaded; run: sudo modprobe btusb && sudo systemctl restart bluetooth");
+    } else if (!state.controllerAvailable) {
+      issues.push("No Bluetooth controller is available to BlueZ; restart bluetooth or reset the adapter");
+    }
+    if (state.powerTransitionStuck) {
+      issues.push(`Bluetooth controller is stuck in PowerState=${state.powerState}; a bluetoothd kill/start or btusb reset may be required`);
+    }
+    if (state.discovering && state.backgroundScannerActive) {
+      issues.push("Background Blauwerk scanner is active while the controller is discovering; stop it before audio recovery");
+    } else if (state.discovering && state.competingManagers.length > 0) {
+      issues.push("Controller is already discovering while Bluetooth manager applets are active; this can cause br-connection-busy during profile connect");
+    }
+    return issues;
   }
 
   async checkAudioConflicts(): Promise<{ pulseaudio: boolean; pipewire: boolean; conflict: boolean }> {
@@ -660,6 +806,19 @@ export class Bluez {
     const managers = await this.findCompetingManagers().catch(() => []);
     if (managers.length > 0) {
       output["competing_managers"] = managers.join("\n");
+    }
+    const host = await this.hostState().catch(() => undefined);
+    if (host) {
+      output["bluetooth_host"] = [
+        `controller: ${host.controllerAvailable ? host.controllerMac ?? "available" : "unavailable"}`,
+        `powered: ${host.powered ?? "unknown"}`,
+        `power_state: ${host.powerState ?? "unknown"}`,
+        `discovering: ${host.discovering ?? "unknown"}`,
+        `btusb_loaded: ${host.btusbLoaded ?? "unknown"}`,
+        `background_scanner_active: ${host.backgroundScannerActive}`,
+      ].join("\n");
+      const hostIssues = this.hostIssues(host);
+      if (hostIssues.length > 0) output["detected_bluetooth_issues"] = hostIssues.join("\n");
     }
     const conflicts = await this.checkAudioConflicts().catch(() => null);
     if (conflicts) {

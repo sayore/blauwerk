@@ -24,6 +24,47 @@ describe("device advisor", () => {
     expect(notices.map(notice => notice.id)).toContain("audio-card-missing");
   });
 
+  test("reports a stuck A2DP profile connection separately from missing sink", () => {
+    const notices = adviseDevice(device({ connected: true, uuids: ["Audio Sink (0000110b-0000-1000-8000-00805f9b34fb)"] }), {
+      audio: {
+        serverAvailable: true,
+        cardFound: false,
+        sinkFound: false,
+        availableProfiles: [],
+        error: "Error: Failed to connect: org.bluez.Error.InProgress br-connection-busy",
+      },
+    });
+    expect(notices.map(notice => notice.id)).toContain("audio-profile-connect-busy");
+  });
+
+  test("reports missing btusb and stuck controller host states", () => {
+    const notices = adviseDevice(device(), {
+      host: {
+        controllerAvailable: false,
+        powerState: "on-disabling",
+        powerTransitionStuck: true,
+        btusbLoaded: false,
+        competingManagers: [],
+        backgroundScannerActive: false,
+      },
+    });
+    expect(notices.map(notice => notice.id)).toContain("bluetooth-controller-driver-missing");
+    expect(notices.map(notice => notice.id)).toContain("bluetooth-controller-power-stuck");
+  });
+
+  test("reports active background scanner during discovery", () => {
+    const notices = adviseDevice(device(), {
+      host: {
+        controllerAvailable: true,
+        discovering: true,
+        btusbLoaded: true,
+        competingManagers: ["941 /usr/bin/bun run src/cli.ts daemon --run"],
+        backgroundScannerActive: true,
+      },
+    });
+    expect(notices.map(notice => notice.id)).toContain("bluetooth-background-scan-active");
+  });
+
   test("explains that discovery-time capabilities may be incomplete", () => {
     const notices = adviseDevice(device({ paired: false, bonded: false, uuids: ["Vendor (12345678-1234-5678-1234-567812345678)"] }));
     expect(notices.map(notice => notice.id)).toContain("capabilities-pending");

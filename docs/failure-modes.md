@@ -156,6 +156,9 @@ with an A2DP sink, not merely `Connected: yes`.
 | Kernel/controller page timeout | BlueZ error | shown in log | partial: power/signal/hardware diagnosis |
 | Connection retries make state worse | repeated matrix attempts | stops on absence/auth rejection | partial: global retry budget/backoff |
 | Another Bluetooth manager competes | busy/in-progress patterns | competing app checks via pgrep | handled |
+| Background scanner holds discovery during audio recovery | controller `Discovering: yes` plus Blauwerk scanner process | diagnose/advisor warning; stop scanner before profile connect | handled |
+| Controller stuck in HCI power transition | `PowerState: on-disabling` / `on-enabling` | diagnose/advisor error with bluetoothd kill/start or btusb reset guidance | handled |
+| USB Bluetooth driver missing after adapter reset | no BlueZ controller plus `btusb` absent from `lsmod` | diagnose/advisor error with `modprobe btusb` guidance | handled |
 | Device firmware crashes under parallel profiles | busy/remote drop | serialized audio recovery | partial |
 
 ## Audio devices

@@ -15,6 +15,12 @@ export interface AdapterPowerState {
 }
 
 const read = (path: string) => existsSync(path) ? readFileSync(path, "utf8").trim() : undefined;
+const readNumber = (path: string): number | undefined => {
+  const value = read(path);
+  if (value === undefined) return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+};
 
 function usbDevicePath(): string {
   let path = realpathSync("/sys/class/bluetooth/hci0/device");
@@ -30,8 +36,8 @@ export function adapterPowerState(): AdapterPowerState {
   return {
     path, vendor: read(join(path, "idVendor")), product: read(join(path, "idProduct")),
     control: read(join(path, "power/control")), runtimeStatus: read(join(path, "power/runtime_status")),
-    autosuspendDelayMs: Number(read(join(path, "power/autosuspend_delay_ms"))),
-    runtimeSuspendedMs: Number(read(join(path, "power/runtime_suspended_time"))),
+    autosuspendDelayMs: readNumber(join(path, "power/autosuspend_delay_ms")),
+    runtimeSuspendedMs: readNumber(join(path, "power/runtime_suspended_time")),
     btusbAutosuspend: read("/sys/module/btusb/parameters/enable_autosuspend") === "Y",
   };
 }

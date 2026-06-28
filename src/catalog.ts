@@ -159,7 +159,7 @@ export function mergeDuplicateIdentities(devices: DeviceState[]): DeviceState[] 
       seenNames.set(nameKey, device);
     }
   }
-  return [...seenNames.values()];
+  return [...merged, ...seenNames.values()];
 }
 
 export function selectBearerForIntent(device: DeviceState, intent: DeviceIntent): "bredr" | "le" | "any" {
@@ -183,7 +183,7 @@ export class DeviceCatalog {
       devices = [...devices, ...bredr, ...all];
     }
     const unique = new Map(devices.map(device => [device.mac, device]));
-    const states = await Promise.all([...unique.keys()].map(mac => this.backend.info(mac)));
+    const states = await Promise.all([...unique.entries()].map(([mac, fallback]) => this.backend.info(mac).catch(() => fallback)));
     return mergeDuplicateIdentities(states);
   }
 

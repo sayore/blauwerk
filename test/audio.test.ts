@@ -136,6 +136,23 @@ describe("AudioManager", () => {
     expect(state.availableProfiles).toEqual(["off", "a2dp-sink-ldac"]);
   });
 
+  test("supports pactl profile maps and boolean availability", async () => {
+    const mockCards = [
+      {
+        name: "bluez_card.ac_b1_ee_71_a1_51",
+        active_profile: "off",
+        profiles: {
+          off: { description: "Off", available: true },
+          "a2dp-sink-sbc": { description: "SBC", available: true },
+          "a2dp-sink-ldac": { description: "LDAC", available: false }
+        }
+      }
+    ];
+    const manager = new MockAudioManager(mockCards, []);
+    const state = await manager.state("AC:B1:EE:71:A1:51");
+    expect(state.availableProfiles).toEqual(["off", "a2dp-sink-sbc"]);
+  });
+
   test("supports active profiles represented as structures with name field", async () => {
     const mockCards = [
       {
@@ -269,6 +286,34 @@ describe("AudioManager", () => {
     expect(connectProfiles).toContain("0000110b-0000-1000-8000-00805f9b34fb");
   });
 
+  test("ensure skips discovery before connecting a known audio device", async () => {
+    const manager = new MockAudioManager();
+    const connectProfiles: (string | undefined)[] = [];
+    let scanned = false;
+    const mockBluez = {
+      info: async () => ({
+        connected: false,
+        servicesResolved: true,
+        paired: true,
+        bonded: true,
+        trusted: true,
+        uuids: ["0000110b-0000-1000-8000-00805f9b34fb"],
+      }),
+      scan: async () => {
+        scanned = true;
+        return [];
+      },
+      connect: async (_mac: string, profile?: string) => { connectProfiles.push(profile); },
+    } as any;
+
+    const state = await manager.ensure(mockBluez, "AC:B1:EE:71:A1:51");
+    expect(scanned).toBeFalse();
+    expect(state.targetSeen).toBeUndefined();
+    expect(state.error).toBe("Known paired/trusted audio device did not keep a connected ACL/profile link");
+    expect(connectProfiles).toContain(undefined);
+    expect(connectProfiles).toContain("0000110b-0000-1000-8000-00805f9b34fb");
+  });
+
   test("ensure triggers wireplumber restart if card is missing after connect", async () => {
     const manager = new MockAudioManager([], []);
 
@@ -281,6 +326,21 @@ describe("AudioManager", () => {
 
     await manager.ensure(mockBluez, "AC:B1:EE:71:A1:51");
     expect(wireplumberRestarted).toBeTrue();
+  });
+
+  test("ensure reports targetSeen when profile-reset scan finds the device", async () => {
+    const manager = new MockAudioManager([], []);
+    const mockBluez = {
+      info: async () => ({ connected: true, servicesResolved: true, uuids: ["0000110b-0000-1000-8000-00805f9b34fb"] }),
+      connect: async () => {},
+      disconnect: async () => {},
+      scan: async () => [{ mac: "AC:B1:EE:71:A1:51" }],
+      trust: async () => {},
+      restartWireplumber: async () => {},
+    } as any;
+
+    const state = await manager.ensure(mockBluez, "AC:B1:EE:71:A1:51");
+    expect(state.targetSeen).toBeTrue();
   });
 
   test("ensure triggers profile cycling if card is present but sink is missing", async () => {

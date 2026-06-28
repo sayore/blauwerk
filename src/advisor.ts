@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { capabilities } from "./catalog";
 import type { ConfigIssue } from "./config";
 import type { AdapterPowerState } from "./power";
-import type { AudioState, DeviceState } from "./types";
+import type { AudioState, BluetoothHostState, DeviceState } from "./types";
 
 export type NoticeSeverity = "info" | "warning" | "error";
 
@@ -17,12 +17,38 @@ export interface DeviceNotice {
 
 export function adviseDevice(
   device: DeviceState,
-  context: { audio?: AudioState; power?: AdapterPowerState; configIssues?: ConfigIssue[] } = {},
+  context: { audio?: AudioState; power?: AdapterPowerState; configIssues?: ConfigIssue[]; host?: BluetoothHostState } = {},
 ): DeviceNotice[] {
   const notices: DeviceNotice[] = [];
   const add = (notice: DeviceNotice) => notices.push(notice);
   const caps = capabilities(device);
+  const audioError = context.audio?.error ?? "";
 
+  if (context.host?.controllerAvailable === false && context.host.btusbLoaded === false) add({
+    id: "bluetooth-controller-driver-missing", severity: "error", title: "Bluetooth controller driver is not loaded",
+    detail: "BlueZ has no controller because the btusb kernel module is not loaded. Audio sinks cannot be created until the adapter is registered again.",
+    command: "sudo modprobe btusb && sudo systemctl restart bluetooth",
+  });
+  else if (context.host?.controllerAvailable === false) add({
+    id: "bluetooth-controller-missing", severity: "error", title: "Bluetooth controller is unavailable",
+    detail: "BlueZ currently has no usable controller, so no device or audio profile can be connected.",
+    command: "sudo systemctl restart bluetooth",
+  });
+  if (context.host?.powerTransitionStuck) add({
+    id: "bluetooth-controller-power-stuck", severity: "error", title: "Bluetooth controller power transition is stuck",
+    detail: `The controller is stuck in PowerState=${context.host.powerState}. This can leave BlueZ connected to no usable HCI adapter and usually needs a bluetoothd kill/start or btusb reset.`,
+    command: "sudo systemctl kill -s SIGKILL bluetooth && sudo systemctl start bluetooth",
+  });
+  if (context.host?.discovering && context.host.backgroundScannerActive) add({
+    id: "bluetooth-background-scan-active", severity: "warning", title: "Background scanner is holding discovery",
+    detail: "The Blauwerk background scanner is active while the controller is discovering. This can collide with Classic audio profile negotiation and cause br-connection-busy.",
+    command: "blauwerk daemon --stop",
+  });
+  else if (context.host?.discovering && context.host.competingManagers.length > 0) add({
+    id: "bluetooth-manager-scan-active", severity: "warning", title: "Bluetooth manager is holding discovery",
+    detail: "The controller is already discovering while a Bluetooth manager applet is active. Stop discovery before attempting A2DP recovery.",
+    command: "bluetoothctl scan off",
+  });
   if (device.blocked) add({
     id: "blocked", severity: "error", title: "Device is blocked",
     detail: "BlueZ will reject connection attempts until the device is unblocked.",
@@ -72,6 +98,11 @@ export function adviseDevice(
     id: "audio-sink-missing", severity: "warning", title: "Audio output profile is inactive",
     detail: "The PipeWire card exists, but no playback sink is available.",
     command: `blauwerk audio ${device.mac} --fix`,
+  });
+  if (!context.audio?.sinkFound && /InProgress|br-connection-busy|Operation already in progress/i.test(audioError)) add({
+    id: "audio-profile-connect-busy", severity: "error", title: "Bluetooth audio profile connection is stuck",
+    detail: "BlueZ reports an in-progress or busy A2DP profile connect. PipeWire will not expose a bluez_card until that stale profile operation is cleared.",
+    command: "blauwerk diagnose",
   });
   if (context.power?.control === "auto") add({
     id: "adapter-autosuspend", severity: "warning", title: "Bluetooth adapter may autosuspend",

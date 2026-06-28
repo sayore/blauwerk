@@ -15,6 +15,7 @@ export interface ConfigIssue {
 export function auditBluezSource(source: string): ConfigIssue[] {
   const issues: ConfigIssue[] = [];
   let section = "";
+  const integer = (value: string) => /^\d+$/.test(value) ? Number(value) : undefined;
   for (const original of source.split("\n")) {
     const line = original.trim();
     if (!line || line.startsWith("#")) continue;
@@ -27,10 +28,16 @@ export function auditBluezSource(source: string): ConfigIssue[] {
     const add = (severity: ConfigIssue["severity"], message: string) => issues.push({ severity, section, key, value, message });
     if (section === "General" && ["IdleTimeout", "UserspaceHID"].includes(key)) add("error", "unsupported in BlueZ 5.86");
     if (section === "BR" && ["ReconnectAttempts", "ReconnectIntervals"].includes(key)) add("error", "belongs to policy configuration, not the BR controller section");
-    if (section === "BR" && key === "PageScanType" && !/^\d+$/.test(value)) add("error", "must be an integer controller parameter");
-    if (section === "BR" && key === "IdleTimeout" && Number(value) < 500) add("error", "BlueZ rejects values below 500");
-    if (section === "BR" && key === "LinkSupervisionTimeout" && Number(value) < 8_000) {
-      add("warning", "very short custom link supervision timeout; can drop idle links during pairing");
+    if (section === "BR" && key === "PageScanType" && integer(value) === undefined) add("error", "must be an integer controller parameter");
+    if (section === "BR" && key === "IdleTimeout") {
+      const parsed = integer(value);
+      if (parsed === undefined) add("error", "must be an integer controller parameter");
+      else if (parsed < 500) add("error", "BlueZ rejects values below 500");
+    }
+    if (section === "BR" && key === "LinkSupervisionTimeout") {
+      const parsed = integer(value);
+      if (parsed === undefined) add("error", "must be an integer controller parameter");
+      else if (parsed < 8_000) add("warning", "very short custom link supervision timeout; can drop idle links during pairing");
     }
   }
   return issues;

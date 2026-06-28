@@ -48,3 +48,15 @@ export interface AudioState {
   targetSeen?: boolean;
   error?: string;
 }
+
+export interface BluetoothHostState {
+  controllerAvailable: boolean;
+  controllerMac?: string;
+  powered?: boolean;
+  powerState?: string;
+  discovering?: boolean;
+  powerTransitionStuck?: boolean;
+  btusbLoaded?: boolean;
+  competingManagers: string[];
+  backgroundScannerActive: boolean;
+}

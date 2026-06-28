@@ -14,6 +14,23 @@ function text(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
+function profiles(value: unknown): JsonObject[] {
+  if (Array.isArray(value)) return value.filter(item => item && typeof item === "object") as JsonObject[];
+  if (!value || typeof value !== "object") return [];
+  return Object.entries(value).flatMap(([name, profile]) => {
+    if (!profile || typeof profile !== "object") return [];
+    const entry = profile as JsonObject;
+    return [{ ...entry, name: text(entry.name) ?? name }];
+  });
+}
+
+function profileAvailable(profile: JsonObject): boolean {
+  const available = profile.available;
+  if (available === false) return false;
+  if (typeof available === "string" && /^(?:no|false|not available)$/i.test(available)) return false;
+  return true;
+}
+
 function macNeedles(mac: string): string[] {
   const lower = mac.toLowerCase();
   const underscore = lower.replaceAll(":", "_");
@@ -37,15 +54,15 @@ export class AudioManager {
     const matches = (entry: JsonObject) => needles.some(needle => JSON.stringify(entry).toLowerCase().includes(needle));
     const card = cardsResult.data.find(matches);
     const sink = sinksResult.data.find(matches);
-    const profiles = objects(card?.profiles);
+    const availableProfiles = profiles(card?.profiles);
     const active = card?.active_profile;
     const activeProfile = typeof active === "object" && active ? text((active as JsonObject).name) : text(active);
     return {
       serverAvailable: !cardsResult.error && !sinksResult.error,
       cardFound: Boolean(card), sinkFound: Boolean(sink),
       cardName: text(card?.name), sinkName: text(sink?.name), activeProfile,
-      availableProfiles: profiles
-        .filter(profile => text(profile.available) !== "no")
+      availableProfiles: availableProfiles
+        .filter(profileAvailable)
         .map(profile => text(profile.name)).filter((name): name is string => Boolean(name)),
       error: cardsResult.error ?? sinksResult.error,
     };
@@ -153,29 +170,42 @@ export class AudioManager {
     if (!state.serverAvailable) await bluez.restartAudio();
 
     let targetSeen: boolean | undefined;
+    let directKnownTarget = false;
     bluetooth = await bluez.info(mac);
     if (!bluetooth.connected) {
-      log("audio.scan", { mode: "bredr", seconds: 10 });
-      const devices = await bluez.scan("bredr", 10);
-      targetSeen = devices.some(device => device.mac === mac);
-      if (!targetSeen) {
-        const related = devices.find(device => {
-          const deviceTail = device.mac.split(":").slice(1).join(":");
-          const macTail = mac.split(":").slice(1).join(":");
-          return device.mac !== mac && deviceTail === macTail;
+      const knownTarget = Boolean(bluetooth.paired || bluetooth.bonded || bluetooth.trusted);
+      if (knownTarget) {
+        directKnownTarget = true;
+        log("audio.direct-connect", {
+          mac,
+          paired: bluetooth.paired,
+          bonded: bluetooth.bonded,
+          trusted: bluetooth.trusted,
+          message: "Skipping discovery for a known Classic audio device; paired devices may be page-connectable without advertising.",
         });
-        if (related) {
-          log("audio.related-identity", {
-            target: mac,
-            seen: related.mac,
-            name: related.alias ?? related.name,
-            message: "Continuing audio recovery because a likely sibling identity is present.",
+      } else {
+        log("audio.scan", { mode: "bredr", seconds: 10 });
+        const devices = await bluez.scan("bredr", 10);
+        targetSeen = devices.some(device => device.mac === mac);
+        if (!targetSeen) {
+          const related = devices.find(device => {
+            const deviceTail = device.mac.split(":").slice(1).join(":");
+            const macTail = mac.split(":").slice(1).join(":");
+            return device.mac !== mac && deviceTail === macTail;
           });
-        } else {
-          log("audio.target-not-seen", {
-            mac,
-            message: "Target was not seen in discovery, but audio recovery will still try a direct profile connect because paired Classic devices may be page-connectable without advertising.",
-          });
+          if (related) {
+            log("audio.related-identity", {
+              target: mac,
+              seen: related.mac,
+              name: related.alias ?? related.name,
+              message: "Continuing audio recovery because a likely sibling identity is present.",
+            });
+          } else {
+            log("audio.target-not-seen", {
+              mac,
+              message: "Target was not seen in discovery, but audio recovery will still try a direct profile connect because paired Classic devices may be page-connectable without advertising.",
+            });
+          }
         }
       }
     }
@@ -187,6 +217,17 @@ export class AudioManager {
       defaultConnectError = String(error);
       log("audio.default-connect", { error: defaultConnectError });
     });
+    await this.waitBluetooth(bluez, mac, true, 8);
+    state = await this.wait(mac, 8);
+    bluetooth = await bluez.info(mac);
+    if (state.sinkFound && state.sinkName) {
+      await this.postConnectReconcile(state.sinkName);
+      return {
+        ...state,
+        bluetoothConnected: bluetooth.connected,
+        targetSeen,
+      };
+    }
 
     log("audio.reconnect", { phase: "a2dp", uuid: A2DP_SINK_UUID });
     
@@ -204,6 +245,11 @@ export class AudioManager {
     await this.waitBluetooth(bluez, mac, true, 10);
     state = await this.wait(mac, 15);
     bluetooth = await bluez.info(mac);
+    if (!state.sinkFound && connectError && /InProgress|br-connection-busy|Operation already in progress/i.test(connectError)) {
+      log("audio.busy-wait", { seconds: 10, message: "A profile connect is already in progress; waiting before resetting the profile." });
+      state = await this.wait(mac, 10);
+      bluetooth = await bluez.info(mac);
+    }
 
     if (bluetooth.connected && !state.cardFound) {
       log("audio.reconnect", { phase: "wireplumber" });
@@ -222,8 +268,10 @@ export class AudioManager {
           return [];
         })
         : [];
+      const resetTargetSeen = resetScan.some(device => device.mac === mac);
+      if (resetTargetSeen) targetSeen = true;
       log("audio.reset-scan", {
-        targetSeen: resetScan.some(device => device.mac === mac),
+        targetSeen: resetTargetSeen,
         devices: resetScan.length,
       });
       if (typeof bluez.trust === "function") {
@@ -236,6 +284,14 @@ export class AudioManager {
       await this.waitBluetooth(bluez, mac, true, 8);
       state = await this.wait(mac, 8);
       bluetooth = await bluez.info(mac);
+      if (state.sinkFound && state.sinkName) {
+        await this.postConnectReconcile(state.sinkName);
+        return {
+          ...state,
+          bluetoothConnected: bluetooth.connected,
+          targetSeen,
+        };
+      }
     }
     if (bluetooth.connected && !state.cardFound) {
       await bluez.connect(mac, A2DP_SINK_UUID, 30_000).catch(error => {
@@ -245,6 +301,11 @@ export class AudioManager {
       await this.waitBluetooth(bluez, mac, true, 10);
       state = await this.wait(mac, 15);
       bluetooth = await bluez.info(mac);
+      if (!state.sinkFound && connectError && /InProgress|br-connection-busy|Operation already in progress/i.test(connectError)) {
+        log("audio.busy-wait", { seconds: 10, phase: "reconnect", message: "A profile reconnect is already in progress; waiting before restarting WirePlumber again." });
+        state = await this.wait(mac, 10);
+        bluetooth = await bluez.info(mac);
+      }
     }
     if (bluetooth.connected && !state.cardFound) {
       log("audio.reconnect", { phase: "wireplumber-after-profile-reset" });
@@ -264,11 +325,17 @@ export class AudioManager {
       await this.postConnectReconcile(state.sinkName);
     }
     bluetooth = await bluez.info(mac);
+    const unresolvedAudioError = state.sinkFound ? undefined
+      : state.cardFound ? "PipeWire has a Bluetooth card, but no A2DP output sink was created"
+      : bluetooth.connected ? "BlueZ is connected, but WirePlumber/PipeWire did not expose a matching bluez_card"
+      : targetSeen ? "Device was seen during discovery, but BlueZ did not keep a connected ACL/profile link"
+      : directKnownTarget ? "Known paired/trusted audio device did not keep a connected ACL/profile link"
+      : "Device was not seen during discovery and no Bluetooth audio sink was created";
     state = {
       ...state,
       bluetoothConnected: bluetooth.connected,
       targetSeen,
-      error: state.sinkFound ? undefined : state.error ?? connectError ?? defaultConnectError,
+      error: state.sinkFound ? undefined : state.error ?? connectError ?? defaultConnectError ?? unresolvedAudioError,
     };
     log("audio.result", { ...state });
     return state;

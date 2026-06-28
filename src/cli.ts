@@ -12,13 +12,14 @@ import { failureScenarios, scenarioCoverage } from "./scenarios";
 import { runSimulation } from "./simulate";
 import { DeviceRegistry } from "./registry";
 import { runDaemon, installDaemon, startDaemon, stopDaemon, getDaemonStatus } from "./daemon";
+import { connectOwnedDevices } from "./owned";
 
-const VERSION = "0.4.9";
+const VERSION = "0.4.10";
 const args = Bun.argv.slice(2);
 const command = args[0]?.startsWith("-") ? "dashboard" : (args.shift() ?? "dashboard");
 const flag = (name: string) => args.includes(name);
 const value = (name: string, fallback?: string) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : fallback; };
-const number = (name: string, fallback: number) => { const parsed = Number(value(name, String(fallback))); if (!Number.isFinite(parsed) || parsed < 0) throw new Error(`${name} must be a positive number`); return parsed; };
+const number = (name: string, fallback: number) => { const parsed = Number(value(name, String(fallback))); if (!Number.isFinite(parsed) || parsed <= 0) throw new Error(`${name} must be a positive number`); return parsed; };
 
 function help(): void {
   console.log(`blauwerk ${VERSION} — resilient Bluetooth management
@@ -37,6 +38,7 @@ Usage:
   blauwerk status MAC
   blauwerk audio MAC [--fix]
   blauwerk connect --mac MAC
+  blauwerk connect-known [--audio-fix] [--category all|audio|input]
   blauwerk disconnect --mac MAC
   blauwerk diagnose
   blauwerk config [--fix]
@@ -63,6 +65,8 @@ Options:
   --require-bond        continue escalation after a usable unbonded connection
   --no-bond             do not force bonding by default for input devices
   --allow-session-drop  permit a temporary disconnect during safe rebond probing
+  --audio-fix           verify/recover audio sinks during connect-known
+  --category NAME       connect-known filter: all, audio, or input (default all)
   --ignore-config       run doctor despite audited BlueZ config errors
   --json                 machine-readable output
   --non-interactive     skip interactive goals prompt in doctor
@@ -79,6 +83,11 @@ Log: ${logPath}`);
 const json = flag("--json");
 const print = (data: unknown) => console.log(json ? JSON.stringify(data, null, 2) : typeof data === "string" ? data : Bun.inspect(data, { colors: true }));
 const requireMac = () => normalizeMac(value("--mac") ?? args[0] ?? (() => { throw new Error("a MAC or --mac is required"); })());
+const ownedCategory = () => {
+  const category = value("--category", "all");
+  if (category !== "all" && category !== "audio" && category !== "input") throw new Error("--category must be all, audio, or input");
+  return category;
+};
 
 function recoveryFor(bluez: Bluez): Recovery {
   return new Recovery(bluez, {
@@ -110,7 +119,8 @@ function printDeviceDashboard(
   audio: any,
   configIssues: any[],
   power: any,
-  optimizeLatency = false
+  optimizeLatency = false,
+  host?: any,
 ): void {
   const bold = (text: string) => `\x1b[1m${text}\x1b[0m`;
   const green = (text: string) => `\x1b[32m${text}\x1b[0m`;
@@ -119,7 +129,7 @@ function printDeviceDashboard(
   const blue = (text: string) => `\x1b[34m${text}\x1b[0m`;
   const dim = (text: string) => `\x1b[2m${text}\x1b[22m`;
   
-  const notices = adviseDevice(device, { audio, power, configIssues });
+  const notices = adviseDevice(device, { audio, power, configIssues, host });
   
   console.log(`\n${bold("=".repeat(80))}`);
   console.log(`${bold(`  BLAUWERK DEVICE REPORT: ${device.alias ?? device.name ?? "Unknown Device"} (${device.mac})`)}`);
@@ -189,6 +199,19 @@ function printDeviceDashboard(
   console.log(`${bold("=".repeat(80))}\n`);
 }
 
+async function printDeviceReport(
+  bluez: Bluez,
+  device: Awaited<ReturnType<Bluez["info"]>>,
+  caps: ReturnType<typeof capabilities>,
+  audio: any,
+  configIssues: any[],
+  power: any,
+  optimizeLatency = false,
+): Promise<void> {
+  const host = await bluez.hostState().catch(() => undefined);
+  printDeviceDashboard(device, caps, audio, configIssues, power, optimizeLatency, host);
+}
+
 async function explore(bluez: Bluez): Promise<void> {
   const catalog = new DeviceCatalog(bluez);
   console.error(`Scanning BR/EDR and all bearers for ${number("--seconds", 8)}s each...`);
@@ -198,7 +221,14 @@ async function explore(bluez: Bluez): Promise<void> {
   if (!devices.length || !process.stdin.isTTY) return;
   const answer = prompt("Device number or MAC (empty to quit):")?.trim();
   if (!answer) return;
-  const device = /^\d+$/.test(answer) ? devices[Number(answer) - 1] : devices.find(item => item.mac === normalizeMac(answer));
+  const device = /^\d+$/.test(answer) ? devices[Number(answer) - 1] : (() => {
+    try {
+      const mac = normalizeMac(answer);
+      return devices.find(item => item.mac === mac);
+    } catch {
+      return undefined;
+    }
+  })();
   if (!device) throw new Error("Invalid device selection");
   
   const inspectData = await catalog.inspect(device.mac);
@@ -208,7 +238,7 @@ async function explore(bluez: Bluez): Promise<void> {
   } else {
     const configIssues = await auditBluezConfig().catch(() => []);
     const power = adapterPowerState();
-    printDeviceDashboard(inspectData.device, inspectData.capabilities, audioState, configIssues, power);
+    await printDeviceReport(bluez, inspectData.device, inspectData.capabilities, audioState, configIssues, power);
   }
 
   const action = prompt("[c]onnect, [d]octor, [x] disconnect, [q]uit:")?.trim().toLowerCase();
@@ -227,7 +257,7 @@ async function explore(bluez: Bluez): Promise<void> {
     } else {
       const configIssues = await auditBluezConfig().catch(() => []);
       const power = adapterPowerState();
-      printDeviceDashboard(state, capabilities(state), audioState, configIssues, power);
+      await printDeviceReport(bluez, state, capabilities(state), audioState, configIssues, power);
     }
   } else if (action === "d") {
     const state = await recoveryFor(bluez).run(device.mac, flag("--aggressive") ? aggressiveMatrix : safeMatrix);
@@ -237,7 +267,7 @@ async function explore(bluez: Bluez): Promise<void> {
     } else {
       const configIssues = await auditBluezConfig().catch(() => []);
       const power = adapterPowerState();
-      printDeviceDashboard(state, capabilities(state), audioState, configIssues, power);
+      await printDeviceReport(bluez, state, capabilities(state), audioState, configIssues, power);
     }
   } else if (action === "x") {
     await bluez.disconnect(device.mac);
@@ -247,7 +277,7 @@ async function explore(bluez: Bluez): Promise<void> {
     } else {
       const configIssues = await auditBluezConfig().catch(() => []);
       const power = adapterPowerState();
-      printDeviceDashboard(state, capabilities(state), undefined, configIssues, power);
+      await printDeviceReport(bluez, state, capabilities(state), undefined, configIssues, power);
     }
   }
 }
@@ -257,12 +287,14 @@ async function selectTarget(bluez: Bluez): Promise<string> {
   if (explicit) return normalizeMac(explicit);
   let devices = await bluez.devices();
   const hint = value("--hint")?.toLowerCase();
-  let matches = hint ? devices.filter(device => `${device.mac} ${device.name ?? ""}`.toLowerCase().includes(hint)) : devices;
+  const matchesHint = (device: Awaited<ReturnType<Bluez["devices"]>>[number]) =>
+    `${device.mac} ${device.name ?? ""} ${device.alias ?? ""}`.toLowerCase().includes(hint ?? "");
+  let matches = hint ? devices.filter(matchesHint) : devices;
   if (!matches.length) {
     devices = [...await bluez.scan("bredr", number("--scan-seconds", 12)), ...await bluez.scan("on", number("--scan-seconds", 12))];
     const unique = new Map(devices.map(device => [device.mac, device]));
     devices = [...unique.values()];
-    matches = hint ? devices.filter(device => `${device.mac} ${device.name ?? ""}`.toLowerCase().includes(hint)) : devices;
+    matches = hint ? devices.filter(matchesHint) : devices;
   }
   if (matches.length === 1) return matches[0]!.mac;
   if (!matches.length) throw new Error(hint ? `No device matches --hint ${JSON.stringify(hint)}` : "No Bluetooth devices found");
@@ -273,7 +305,11 @@ async function selectTarget(bluez: Bluez): Promise<string> {
     const selected = matches[Number(answer) - 1];
     if (selected) return selected.mac;
   }
-  return normalizeMac(answer);
+  try {
+    return normalizeMac(answer);
+  } catch {
+    throw new Error("Invalid device selection");
+  }
 }
 
 async function main(): Promise<void> {
@@ -315,7 +351,7 @@ async function main(): Promise<void> {
       } else {
         const configIssues = await auditBluezConfig().catch(() => []);
         const power = adapterPowerState();
-        return printDeviceDashboard(info.device, info.capabilities, audioState, configIssues, power);
+        return printDeviceReport(bluez, info.device, info.capabilities, audioState, configIssues, power);
       }
     }
     case "status": {
@@ -327,7 +363,7 @@ async function main(): Promise<void> {
       } else {
         const configIssues = await auditBluezConfig().catch(() => []);
         const power = adapterPowerState();
-        return printDeviceDashboard(state, capabilities(state), audioState, configIssues, power);
+        return printDeviceReport(bluez, state, capabilities(state), audioState, configIssues, power);
       }
     }
     case "audio": {
@@ -339,17 +375,45 @@ async function main(): Promise<void> {
       const mac = requireMac();
       await bluez.trust(mac);
       if (!(await bluez.info(mac)).connected) await bluez.connect(mac);
-      const state = await bluez.info(mac);
-      const audioState = await ensurePlayback(bluez, state);
+      const initialState = await bluez.info(mac);
+      const audioState = await ensurePlayback(bluez, initialState);
+      const state = await bluez.info(mac).catch(() => initialState);
+      if (!state.connected || (audioState && !audioState.sinkFound)) process.exitCode = 1;
       if (json) {
         return print({ bluetooth: state, capabilities: capabilities(state), audio: audioState });
       } else {
         const configIssues = await auditBluezConfig().catch(() => []);
         const power = adapterPowerState();
-        return printDeviceDashboard(state, capabilities(state), audioState, configIssues, power);
+        return printDeviceReport(bluez, state, capabilities(state), audioState, configIssues, power);
       }
     }
-    case "disconnect": await bluez.disconnect(requireMac()); return print(await bluez.info(requireMac()));
+    case "connect-known":
+    case "connect-all": {
+      const results = await connectOwnedDevices(bluez, {
+        registry: new DeviceRegistry(),
+        category: ownedCategory(),
+        audioFix: flag("--audio-fix"),
+        audioManager: new AudioManager(),
+        connectTimeoutMs: number("--connect-timeout", 25) * 1_000,
+      });
+      const failures = results.filter(result => result.attempted && (!result.connected || result.error));
+      if (json) {
+        print({ results, failures: failures.length });
+      } else {
+        console.log(`${"MAC".padEnd(17)}  ${"STATE".padEnd(12)}  ${"TYPE".padEnd(7)}  NAME / ERROR`);
+        for (const result of results) {
+          const state = result.skipped ? `skip:${result.skipped}` : result.connected ? result.alreadyConnected ? "already" : "connected" : "failed";
+          console.log(`${result.mac}  ${state.slice(0, 12).padEnd(12)}  ${result.category.padEnd(7)}  ${result.error ?? result.name ?? ""}`);
+        }
+      }
+      if (failures.length) process.exitCode = 2;
+      return;
+    }
+    case "disconnect": {
+      const mac = requireMac();
+      await bluez.disconnect(mac);
+      return print(await bluez.info(mac));
+    }
     case "diagnose": return print(await bluez.diagnostics());
     case "config": {
       const issues = await auditBluezConfig().catch(() => []);
@@ -426,7 +490,7 @@ async function main(): Promise<void> {
       if (json) {
         print({ bluetooth: state, capabilities: capabilities(state), audio });
       } else {
-        printDeviceDashboard(state, capabilities(state), audio, configIssues, power, optimizeLatency);
+        await printDeviceReport(bluez, state, capabilities(state), audio, configIssues, power, optimizeLatency);
       }
       
       const audioPlayable = Boolean(audio?.sinkFound);

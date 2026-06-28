@@ -94,6 +94,13 @@ describe("BlueZ configuration audit", () => {
     expect(issues[0]?.severity).toBe("error");
   });
 
+  test("reports error for non-integer BR IdleTimeout", () => {
+    const issues = auditBluezSource("[BR]\nIdleTimeout=fast\n");
+    expect(issues).toHaveLength(1);
+    expect(issues[0]?.key).toBe("IdleTimeout");
+    expect(issues[0]?.severity).toBe("error");
+  });
+
   test("does not report error for BR IdleTimeout >= 500", () => {
     const issues = auditBluezSource("[BR]\nIdleTimeout=500\nIdleTimeout=600\n");
     expect(issues).toHaveLength(0);
@@ -104,6 +111,13 @@ describe("BlueZ configuration audit", () => {
     expect(issues).toHaveLength(1);
     expect(issues[0]?.key).toBe("LinkSupervisionTimeout");
     expect(issues[0]?.severity).toBe("warning");
+  });
+
+  test("reports error for non-integer BR LinkSupervisionTimeout", () => {
+    const issues = auditBluezSource("[BR]\nLinkSupervisionTimeout=short\n");
+    expect(issues).toHaveLength(1);
+    expect(issues[0]?.key).toBe("LinkSupervisionTimeout");
+    expect(issues[0]?.severity).toBe("error");
   });
 
   test("does not report warning for BR LinkSupervisionTimeout >= 8000", () => {

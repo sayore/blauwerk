@@ -267,3 +267,7 @@ bun install
 bun test
 bun run check
 ```
+
+## License
+
+MIT. See [LICENSE](LICENSE).

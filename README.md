@@ -18,6 +18,19 @@ For quick system diagnostics check:
 blauwerk diagnose
 ```
 
+### Arch Linux / pacman
+
+Arch-based systems can build and install the package with `makepkg`:
+
+```bash
+cd packaging/arch
+makepkg -si
+```
+
+The package builds a native standalone binary from the tagged source release.
+Bun is only needed while building; the installed `blauwerk` command does not
+need Bun at runtime.
+
 
 It treats recovery as a convergent state machine: every step re-reads device
 state, preserves completed work, and escalates only as far as necessary.

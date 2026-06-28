@@ -1,0 +1,27 @@
+pkgbase = blauwerk
+	pkgdesc = Resilient Bluetooth management and recovery CLI for BlueZ/PipeWire
+	pkgver = 0.4.10
+	pkgrel = 1
+	url = https://github.com/sayore/blauwerk
+	arch = x86_64
+	arch = aarch64
+	license = LicenseRef-UNKNOWN
+	makedepends = bun
+	depends = bluez
+	depends = bluez-utils
+	depends = gcc-libs
+	depends = glibc
+	depends = icu
+	optdepends = libpulse: pactl-compatible audio graph inspection
+	optdepends = pipewire: Bluetooth audio sink integration
+	optdepends = sudo: privileged recovery actions
+	optdepends = systemd: daemon/service management and journal diagnostics
+	optdepends = usbutils: USB adapter power diagnostics
+	optdepends = wireplumber: PipeWire Bluetooth policy and profile switching
+	provides = bt-matrix
+	conflicts = blauwerk-bin
+	options = !strip
+	source = blauwerk-0.4.10.tar.gz::https://github.com/sayore/blauwerk/archive/refs/tags/v0.4.10.tar.gz
+	sha256sums = 0931b75e1080a04901e5e326195f93adccfc65075f8f1ef2fea09b9ed691407f
+
+pkgname = blauwerk

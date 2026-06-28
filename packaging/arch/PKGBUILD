@@ -1,0 +1,42 @@
+# Maintainer: sayore <sayore@users.noreply.github.com>
+pkgname=blauwerk
+pkgver=0.4.10
+pkgrel=1
+pkgdesc="Resilient Bluetooth management and recovery CLI for BlueZ/PipeWire"
+arch=("x86_64" "aarch64")
+url="https://github.com/sayore/blauwerk"
+license=("LicenseRef-UNKNOWN")
+depends=("bluez" "bluez-utils" "gcc-libs" "glibc" "icu")
+makedepends=("bun")
+options=("!strip")
+optdepends=(
+  "libpulse: pactl-compatible audio graph inspection"
+  "pipewire: Bluetooth audio sink integration"
+  "sudo: privileged recovery actions"
+  "systemd: daemon/service management and journal diagnostics"
+  "usbutils: USB adapter power diagnostics"
+  "wireplumber: PipeWire Bluetooth policy and profile switching"
+)
+provides=("bt-matrix")
+conflicts=("blauwerk-bin")
+source=("${pkgname}-${pkgver}.tar.gz::${url}/archive/refs/tags/v${pkgver}.tar.gz")
+sha256sums=("0931b75e1080a04901e5e326195f93adccfc65075f8f1ef2fea09b9ed691407f")
+
+build() {
+  cd "${srcdir}/${pkgname}-${pkgver}"
+  local bun_target
+  case "${CARCH}" in
+    x86_64) bun_target="bun-linux-x64" ;;
+    aarch64) bun_target="bun-linux-arm64" ;;
+    *) echo "Unsupported architecture: ${CARCH}" >&2; return 1 ;;
+  esac
+  bun build --compile --target="${bun_target}" --outfile="${pkgname}" src/cli.ts
+}
+
+package() {
+  cd "${srcdir}/${pkgname}-${pkgver}"
+  install -Dm755 "${pkgname}" "${pkgdir}/usr/bin/blauwerk"
+  ln -s blauwerk "${pkgdir}/usr/bin/bt-matrix"
+  install -Dm644 README.md "${pkgdir}/usr/share/doc/${pkgname}/README.md"
+  install -Dm644 docs/failure-modes.md "${pkgdir}/usr/share/doc/${pkgname}/failure-modes.md"
+}
